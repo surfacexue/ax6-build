@@ -1,0 +1,149 @@
+name: Build AX6 NSS Firmware
+
+# 云编译 TerryLip/AX6NSS-qosmio 的 Redmi AX6 (stock) 固件，
+# 相对上游只做了一处改动：启用 WireGuard 四个包。
+#
+# 用法：仓库 Actions 页 -> Build AX6 NSS Firmware -> Run workflow
+
+on:
+  # 推送即编译（无需 token / gh CLI）
+  push:
+    branches: [main]
+    paths:
+      - 'ax6.config'
+      - '.github/workflows/build.yml'
+  # 也支持手动触发
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: '源码分支/标签（默认作者默认分支）'
+        required: false
+        default: 'qualcommax-6.x-nss-wifi'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    # GitHub 单个 job 上限 6 小时，留 10 分钟余量
+    timeout-minutes: 350
+    env:
+      # push 触发时 inputs 为空，这里兜底成作者默认分支
+      SOURCE_REF: ${{ github.event.inputs.source_ref || 'qualcommax-6.x-nss-wifi' }}
+
+    steps:
+      # 注意：必须先检出本仓库，才能拿到 ax6.config；
+      # 作者源码用 git clone 单独拉到 openwrt/ 子目录。
+      - name: 检出本仓库
+        uses: actions/checkout@v4
+
+      - name: 运行环境信息
+        run: |
+          uname -a
+          echo "CPU 核心: $(nproc)"
+          free -h
+          df -h /
+
+      - name: 清理磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      /usr/share/swift /usr/local/.ghcup /opt/microsoft \
+                      /usr/local/share/powershell /usr/share/miniconda
+          sudo apt-get -y purge -qq '^llvm-.*' '^mysql-.*' '^php.*' 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git \
+            libncurses5-dev libssl-dev python3-distutils \
+            rsync unzip zlib1g-dev file wget subversion ccache time
+          df -h /
+
+      - name: 拉取固件源码
+        run: |
+          echo "目标分支: $SOURCE_REF"
+          git clone --depth 1 --branch "$SOURCE_REF" \
+            https://github.com/TerryLip/AX6NSS-qosmio.git openwrt
+          cd openwrt
+          echo "--- 源码 HEAD ---"
+          git log -1 --oneline
+          du -sh .
+
+      - name: 恢复 ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.run_id }}
+          restore-keys: |
+            ccache-
+
+      - name: 更新 feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 应用作者要求的替换（LuCI 面板 / golang）
+        run: |
+          cd openwrt
+          rm -rf feeds/luci/modules/luci-base
+          rm -rf feeds/luci/modules/luci-mod-status
+          rm -rf feeds/packages/utils/coremark
+          rm -rf feeds/packages/net/v2ray-geodata
+          rm -rf feeds/packages/lang/golang
+          svn export -q https://github.com/immortalwrt/luci/branches/master/modules/luci-base feeds/luci/modules/luci-base
+          svn export -q https://github.com/immortalwrt/luci/branches/master/modules/luci-mod-status feeds/luci/modules/luci-mod-status
+          git clone --depth 1 https://github.com/sbwml/packages_lang_golang -b 23.x feeds/packages/lang/golang
+          rm -rf ./tmp
+          ./scripts/feeds install -a
+
+      - name: 应用编译配置
+        run: |
+          cp ax6.config openwrt/.config
+          cd openwrt
+          make defconfig
+          echo "--- 目标设备 ---"
+          grep -E '^CONFIG_TARGET_qualcommax_ipq807x_DEVICE_redmi_ax6-stock=y' .config || {
+            echo "::error::目标设备 redmi_ax6-stock 未启用"; exit 1; }
+
+      - name: 校验 WireGuard 已启用
+        run: |
+          cd openwrt
+          COUNT=$(grep -cE '^CONFIG_PACKAGE_(kmod-wireguard|wireguard-tools|luci-proto-wireguard|rpcd-mod-wireguard)=y' .config || true)
+          grep -E '^CONFIG_PACKAGE_(kmod-wireguard|wireguard-tools|luci-proto-wireguard|rpcd-mod-wireguard)=y' .config || true
+          echo "命中行数: $COUNT（应为 4）"
+          if [ "$COUNT" -lt 4 ]; then
+            echo "::error::WireGuard 配置未全部启用，终止编译"
+            exit 1
+          fi
+
+      - name: 下载依赖源码
+        run: |
+          cd openwrt
+          make download -j8 || make download -j1 V=s
+
+      - name: 编译固件
+        run: |
+          cd openwrt
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: 收集产物
+        run: |
+          mkdir -p out
+          find openwrt/bin/targets -name "*sysupgrade.bin" -exec cp {} out/ \;
+          find openwrt/bin/targets -name "*factory.ubi" -exec cp {} out/ \; 2>/dev/null || true
+          find openwrt/bin/targets -name "sha256sums" -exec cp {} out/ \; 2>/dev/null || true
+          find openwrt/bin/targets -name "config.buildinfo" -exec cp {} out/ \; 2>/dev/null || true
+          echo "--- 产物清单 ---"
+          ls -lh out/
+          sha256sum out/* || true
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax6-nss-wireguard-firmware
+          path: out/
+          retention-days: 30
