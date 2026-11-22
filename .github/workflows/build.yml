@@ -1,4 +1,5 @@
 name: Build AX6 NSS Firmware
+# trigger-marker: 1
 
 # 云编译 TerryLip/AX6NSS-qosmio 的 Redmi AX6 (stock) 固件，
 # 相对上游只做了一处改动：启用 WireGuard 四个包。
