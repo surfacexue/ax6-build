@@ -101,75 +101,59 @@ jobs:
           restore-keys: |
             ccache-
 
-      - name: 更新 feeds
+      - name: 更新 feeds（luci 固定到 immortalwrt openwrt-25.12）
         run: |
           cd openwrt
+          # 【为什么要换 luci feed 的来源】
+          # 作者 README 要求用 immortalwrt 的 LuCI 覆盖源码树自带的官方 LuCI
+          # （源码树 feeds 指向 openwrt/project/luci，其 master 一直在跑）。
+          # 但 LuCI 的版本约束写在 feed 根部的 luci.mk 里，只换 modules/ 下的
+          # 几个模块没用：
+          #   - master 的 luci.mk 有 LUCI_UT_MIN_UCODE=2026.02.27，
+          #     会把模板编成 ucode 字节码（format 0x02），而本树 ucode 是
+          #     2025.05.11 → package/install 报
+          #     "ucode-2025.05.11 breaks luci-base[...ucode>=2026.02.27]"
+          #   - openwrt-25.12 的 luci.mk 完全没有 UT/字节码约束，
+          #     且 luci-base 依赖的 ucode-mod-html 由 LuCI 自己的
+          #     contrib/package/ucode-mod-html 提供（不是主线 ucode 的模块），
+          #     所以依赖可以正常解析
+          # 因此把整个 luci feed 指到 immortalwrt 的 openwrt-25.12 分支。
+          if [ -f feeds.conf ]; then rm -f feeds.conf; fi
+          sed -i 's#^src-git luci .*#src-git luci https://github.com/immortalwrt/luci.git;openwrt-25.12#' feeds.conf.default
+          echo "--- feeds.conf.default 中的 luci 行 ---"
+          grep -n '^src-git luci' feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 替换 LuCI 面板与 golang（作者要求，改用 git 替代已停服的 svn）
+      - name: 替换 golang 并校验 LuCI 来源（作者要求，改用 git 替代已停服的 svn）
         run: |
           set -e
           cd "$GITHUB_WORKSPACE/openwrt"
 
-          # GitHub 已于 2024 年停止 Subversion 支持，作者 README 里的
-          # `svn export https://github.com/...` 现在必然 404，改用 git。
-          #
-          # 【为什么不能直接用分支 HEAD】
-          #   - master：把模板编译成 ucode 字节码（format 0x02），要求
-          #     ucode >= 2026.02.27，本树 ucode 是 2025.05.11 → 依赖冲突
-          #   - 24.10 / 25.12：luci-base 依赖 +ucode-mod-html，而本树的
-          #     ucode 只编 debug/fs/log/math/resolv/rtnl/socket/struct/ubus/
-          #     uci/uloop/digest，根本没有 html 模块 → apk 报
-          #     "unable to select packages"（package/install Error 53）
-          # 因此改为「回溯时间点」：从近到远找第一个没有 ucode-mod-html 依赖的
-          # 提交，使 LuCI 与源码树的 ucode 年份对齐，避开上面两种情况。
-          #
-          # 另外只做"原位替换"，不删除 v2ray-geodata：本配置启用了
-          # CONFIG_PACKAGE_v2ray-geoip / v2ray-geosite（openclash 依赖），删了会断链。
-          LUCI_TMP="$RUNNER_TEMP/luci-src"
-          rm -rf "$LUCI_TMP"
-          # blobless 克隆：只取提交与树对象，文件按需拉取，体积可控
-          git clone --filter=blob:none --no-checkout --single-branch \
-            -b master https://github.com/immortalwrt/luci "$LUCI_TMP"
-          git -C "$LUCI_TMP" sparse-checkout init --cone
-          git -C "$LUCI_TMP" sparse-checkout set modules/luci-base modules/luci-mod-status
+          # LuCI 的来源已在上一步通过 feeds.conf.default 固定为 immortalwrt
+          # 的 openwrt-25.12 分支，这里只做「就地校验 + golang 替换」。
+          # 只替换 modules/ 下几个模块是不够的：ucode 版本约束写在 feed 根部的
+          # luci.mk 里，换模块不换 luci.mk，约束依然生效。
+          test -f feeds/luci/luci.mk || { echo "::error::找不到 feeds/luci/luci.mk，luci feed 未正确拉取"; exit 1; }
 
-          # 从近到远回溯时间点，选第一个「luci-base 不依赖 ucode-mod-html」的提交。
-          # 每个候选只拉取两个模块目录的小文件，校验很快，失败也不会浪费整轮编译。
-          LUCI_REF=""
-          for D in 2025-12-01 2025-09-01 2025-06-01 2025-03-01 2024-12-01; do
-            SHA=$(git -C "$LUCI_TMP" rev-list -1 --before="$D" origin/master)
-            [ -n "$SHA" ] || continue
-            git -C "$LUCI_TMP" checkout -q "$SHA" 2>/dev/null || continue
-            if ! grep -q 'ucode-mod-html' "$LUCI_TMP/modules/luci-base/Makefile" 2>/dev/null; then
-              LUCI_REF="$SHA"
-              echo "选用 $D 之前的提交 ${SHA:0:10}"
-              break
-            fi
-            echo "跳过 $D 之前的 ${SHA:0:10}（仍依赖 ucode-mod-html）"
-          done
-          if [ -z "$LUCI_REF" ]; then
-            echo "::error::回溯所有候选提交都依赖 ucode-mod-html，需人工指定 LUCI 版本"
+          # 校验 1：luci.mk 不得含字节码约束（含则表示要求 ucode >= 2026.02.27）
+          if grep -q 'LUCI_UT_MIN_UCODE' feeds/luci/luci.mk; then
+            echo "::error::luci.mk 含 LUCI_UT_MIN_UCODE，与源码树 ucode 2025.05.11 冲突"
             exit 1
           fi
-          git -C "$LUCI_TMP" log -1 --format='LuCI 提交: %h %ad %s' --date=short
+          echo "OK  luci.mk 无 ucode 字节码约束"
 
-          rm -rf feeds/luci/modules/luci-base feeds/luci/modules/luci-mod-status
-          cp -a "$LUCI_TMP/modules/luci-base"        feeds/luci/modules/luci-base
-          cp -a "$LUCI_TMP/modules/luci-mod-status"  feeds/luci/modules/luci-mod-status
-
-          # 【反向校验】替换后的 luci-base 不得再依赖本树没有的包/版本
-          if grep -q 'ucode-mod-html' feeds/luci/modules/luci-base/Makefile; then
-            echo "::error::替换后的 luci-base 仍依赖 ucode-mod-html，源码树无法满足"
+          # 校验 2：LuCI 依赖的 ucode-mod-html 由 luci feed 的 contrib 提供，
+          # 缺了会在 package/install 阶段以 Error 53 失败（apk 无法解析依赖）
+          if [ ! -f feeds/luci/contrib/package/ucode-mod-html/Makefile ]; then
+            echo "::error::缺少 feeds/luci/contrib/package/ucode-mod-html，依赖无法解析"
             exit 1
           fi
-          echo "OK  已确认 luci-base 不再依赖 ucode-mod-html"
-          if grep -qE 'ucode *\(>= *2026' feeds/luci/modules/luci-base/Makefile; then
-            echo "::error::luci-base 仍要求 ucode >= 2026，与源码树 ucode 2025.05.11 冲突"
-            exit 1
-          fi
-          echo "OK  无 ucode 版本下限约束"
+          echo "OK  ucode-mod-html 由 feeds/luci/contrib 提供"
+
+          # 校验 3：打印 LuCI 实际版本，便于事后核对
+          grep -nE '^PKG_GITBRANCH|^LUCI_BRANCH' feeds/luci/luci.mk | head -3 || true
+          git -C feeds/luci log -1 --format='LuCI 提交: %h %ad %s' --date=short 2>/dev/null || true
 
           # golang 换 sbwml 的 23.x 分支（原地替换，package/feeds 下的软链保持不变）
           rm -rf feeds/packages/lang/golang
@@ -178,7 +162,7 @@ jobs:
 
           rm -rf ./tmp
 
-          # 硬校验：三个替换件必须就位，否则直接失败而不是带病往下跑
+          # 硬校验：替换件必须就位，否则直接失败而不是带病往下跑
           for f in feeds/luci/modules/luci-base/Makefile \
                    feeds/luci/modules/luci-mod-status/Makefile \
                    feeds/packages/lang/golang/golang/Makefile; do
