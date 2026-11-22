@@ -1,5 +1,5 @@
 name: Build AX6 NSS Firmware
-# trigger-marker: 1
+# trigger-marker: 2
 
 # 云编译 TerryLip/AX6NSS-qosmio 的 Redmi AX6 (stock) 固件，
 # 相对上游只做了一处改动：启用 WireGuard 四个包。
@@ -87,19 +87,39 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 应用作者要求的替换（LuCI 面板 / golang）
+      - name: 替换 LuCI 面板与 golang（作者要求，改用 git 替代已停服的 svn）
         run: |
-          cd openwrt
-          rm -rf feeds/luci/modules/luci-base
-          rm -rf feeds/luci/modules/luci-mod-status
-          rm -rf feeds/packages/utils/coremark
-          rm -rf feeds/packages/net/v2ray-geodata
+          set -e
+          cd "$GITHUB_WORKSPACE/openwrt"
+
+          # GitHub 已于 2024 年停止 Subversion 支持，作者 README 里的
+          # `svn export https://github.com/...` 现在必然 404，改用 git sparse-checkout。
+          # 另外只做"原位替换"，不删除 v2ray-geodata：本配置启用了
+          # CONFIG_PACKAGE_v2ray-geoip / v2ray-geosite（openclash 依赖），删了会断链。
+          LUCI_TMP="$RUNNER_TEMP/luci-src"
+          rm -rf "$LUCI_TMP"
+          git clone --depth 1 --filter=blob:none --sparse \
+            -b master https://github.com/immortalwrt/luci "$LUCI_TMP"
+          git -C "$LUCI_TMP" sparse-checkout set modules/luci-base modules/luci-mod-status
+
+          rm -rf feeds/luci/modules/luci-base feeds/luci/modules/luci-mod-status
+          cp -a "$LUCI_TMP/modules/luci-base"        feeds/luci/modules/luci-base
+          cp -a "$LUCI_TMP/modules/luci-mod-status"  feeds/luci/modules/luci-mod-status
+
+          # golang 换 sbwml 的 23.x 分支（原地替换，package/feeds 下的软链保持不变）
           rm -rf feeds/packages/lang/golang
-          svn export -q https://github.com/immortalwrt/luci/branches/master/modules/luci-base feeds/luci/modules/luci-base
-          svn export -q https://github.com/immortalwrt/luci/branches/master/modules/luci-mod-status feeds/luci/modules/luci-mod-status
-          git clone --depth 1 https://github.com/sbwml/packages_lang_golang -b 23.x feeds/packages/lang/golang
+          git clone --depth 1 https://github.com/sbwml/packages_lang_golang \
+            -b 23.x feeds/packages/lang/golang
+
           rm -rf ./tmp
-          ./scripts/feeds install -a
+
+          # 硬校验：三个替换件必须就位，否则直接失败而不是带病往下跑
+          for f in feeds/luci/modules/luci-base/Makefile \
+                   feeds/luci/modules/luci-mod-status/Makefile \
+                   feeds/packages/lang/golang/golang/Makefile; do
+            if [ -f "$f" ]; then echo "OK  $f"; else echo "::error::$f 缺失"; exit 1; fi
+          done
+          ls -d package/feeds/luci/luci-base package/feeds/luci/luci-mod-status package/feeds/packages/golang
 
       - name: 应用编译配置
         run: |
