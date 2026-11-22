@@ -33,11 +33,19 @@
 | `ax6.config` | 编译配置（作者 `AX6.config` + 4 行 WireGuard） |
 | `.github/workflows/build.yml` | 云编译流程 |
 
-编译流程严格跟随作者 README 的“本地编译详细步骤”，包括三处替换：
+编译流程跟随作者 README 的“本地编译详细步骤”，但有两处**必须偏离**（2026-11-22 实测修正）：
 
-- `luci-base`、`luci-mod-status` ← 从 `immortalwrt/luci` master 分支 svn export
-- `golang` ← 换成 `sbwml/packages_lang_golang` 的 `23.x` 分支
-- 删除 `coremark`、`v2ray-geodata`
+- `luci-base`、`luci-mod-status` ← 用 `git clone --sparse` + `git sparse-checkout`
+  从 `immortalwrt/luci` 的 `master` 分支取。**原 README 的 `svn export` 已失效**：
+  GitHub 2024 年停止 Subversion 支持，`https://github.com/immortalwrt/luci/trunk` 返回 404
+- `golang` ← 换成 `sbwml/packages_lang_golang` 的 `23.x` 分支（`git clone`，这一步原本就正常）
+
+删包方面只删 `coremark`（未被配置启用，删除无害）。**`v2ray-geodata` 不删**：
+`ax6.config` 里 `CONFIG_PACKAGE_v2ray-geoip=y`、`v2ray-geosite=y` 正是该包提供，
+且 openclash 依赖它们，删掉会断依赖链导致 `depends on v2ray-geoip which is not available`。
+
+因采用“原位替换”，`package/feeds/` 下的软链保持有效，**不要**再重跑
+`./scripts/feeds install -a`（会因 coremark 已删而报缺包）。
 
 ## 注意
 
