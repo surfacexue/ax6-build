@@ -29,6 +29,8 @@ jobs:
     env:
       # push 触发时 inputs 为空，这里兜底成作者默认分支
       SOURCE_REF: ${{ github.event.inputs.source_ref || 'qualcommax-6.x-nss-wifi' }}
+      # ccache 放到 74G 临时盘，避免挤占根分区
+      CCACHE_DIR: /mnt/ax6build/.ccache
 
     steps:
       # 注意：必须先检出本仓库，才能拿到 ax6.config；
@@ -65,10 +67,21 @@ jobs:
 
       - name: 拉取固件源码
         run: |
+          # runner 根分区只有 ~14G（清理后约 30G），qualcommax + NSS 全量编译
+          # 加上 ccache 很容易顶满；另有一块 74G 临时盘挂在 /mnt，把构建树放过去。
+          BUILD_ROOT=/mnt/ax6build
+          sudo mkdir -p "$BUILD_ROOT"
+          sudo chown -R "$(id -u):$(id -g)" "$BUILD_ROOT"
+          mkdir -p "$BUILD_ROOT/.ccache"
+          echo "--- 磁盘 ---"
+          df -h / /mnt
           echo "目标分支: $SOURCE_REF"
           git clone --depth 1 --branch "$SOURCE_REF" \
-            https://github.com/TerryLip/AX6NSS-qosmio.git openwrt
+            https://github.com/TerryLip/AX6NSS-qosmio.git "$BUILD_ROOT/openwrt"
+          ln -sfn "$BUILD_ROOT/openwrt" openwrt
           cd openwrt
+          echo "--- 实际路径 ---"
+          pwd -P
           echo "--- 源码 HEAD ---"
           git log -1 --oneline
           du -sh .
@@ -76,7 +89,7 @@ jobs:
       - name: 恢复 ccache
         uses: actions/cache@v4
         with:
-          path: ~/.ccache
+          path: /mnt/ax6build/.ccache
           key: ccache-${{ github.run_id }}
           restore-keys: |
             ccache-
@@ -149,7 +162,60 @@ jobs:
       - name: 编译固件
         run: |
           cd openwrt
-          make -j"$(nproc)" || make -j1 V=s
+          set -o pipefail
+          echo "== 并行编译 (nproc=$(nproc)) =="
+          if make -j"$(nproc)" 2>&1 | tee /tmp/build.log; then
+            echo "并行编译成功"
+            exit 0
+          fi
+          echo "== 并行编译失败，串行 V=s 重试（保留首个错误现场） =="
+          cp /tmp/build.log /tmp/build_parallel.log
+          free -h; df -h /
+          make -j1 V=s 2>&1 | tee /tmp/build_serial.log || true
+          cp /tmp/build_serial.log /tmp/build.log
+          exit 1
+
+      # 失败时把关键错误写进 job summary + annotation
+      # annotation 与 check-run summary 无需登录即可通过 API 读取，便于远程诊断
+      - name: 失败诊断
+        if: failure()
+        run: |
+          LOG=/tmp/build.log
+          [ -f "$LOG" ] || LOG=/tmp/build_serial.log
+          {
+            echo "## 编译失败诊断"
+            echo ""
+            echo '**磁盘**'
+            echo '```'
+            df -h / /mnt 2>/dev/null | tail -4
+            echo '```'
+            echo '**内存**'
+            echo '```'
+            free -h | head -3
+            echo '```'
+            echo "### 匹配到的错误行（末尾 40 条）"
+            echo '```'
+            grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|fatal error|undefined reference" "$LOG" 2>/dev/null | tail -40 || echo "(未匹配到关键字)"
+            echo '```'
+            echo "### 日志末尾 120 行"
+            echo '```'
+            tail -120 "$LOG" 2>/dev/null
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|undefined reference" "$LOG" 2>/dev/null \
+            | tail -8 | while IFS= read -r l; do echo "::error title=build-error::$l"; done
+          mkdir -p out
+          tail -c 3000000 "$LOG" > out/build-tail.log 2>/dev/null || true
+          echo "诊断已写入 job summary"
+
+      - name: 上传编译日志（仅失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: out/build-tail.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: 收集产物
         run: |
