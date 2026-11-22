@@ -24,6 +24,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # 新提交自动取消仍在运行的旧任务，避免白白占额度
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
     # GitHub 单个 job 上限 6 小时，留 10 分钟余量
     timeout-minutes: 350
     env:
@@ -107,12 +111,19 @@ jobs:
 
           # GitHub 已于 2024 年停止 Subversion 支持，作者 README 里的
           # `svn export https://github.com/...` 现在必然 404，改用 git sparse-checkout。
+          #
+          # 分支必须用 openwrt-25.12，不能用 master：2026 年起 master 的 luci.mk
+          # 把模板编译成 ucode 字节码（format 0x02），要求运行时 ucode >= 2026.02.27，
+          # 而本源码树的 ucode 是 2025.05.11，会在 package/install 阶段报
+          # "ucode-2025.05.11 breaks luci-base[...ucode>=2026.02.27]" 而失败。
+          # 25.12 分支没有这个字节码约束，且比 24.10 更贴近本源码树的年代。
+          #
           # 另外只做"原位替换"，不删除 v2ray-geodata：本配置启用了
           # CONFIG_PACKAGE_v2ray-geoip / v2ray-geosite（openclash 依赖），删了会断链。
           LUCI_TMP="$RUNNER_TEMP/luci-src"
           rm -rf "$LUCI_TMP"
           git clone --depth 1 --filter=blob:none --sparse \
-            -b master https://github.com/immortalwrt/luci "$LUCI_TMP"
+            -b openwrt-25.12 https://github.com/immortalwrt/luci "$LUCI_TMP"
           git -C "$LUCI_TMP" sparse-checkout set modules/luci-base modules/luci-mod-status
 
           rm -rf feeds/luci/modules/luci-base feeds/luci/modules/luci-mod-status
