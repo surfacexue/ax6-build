@@ -303,6 +303,7 @@ jobs:
           find openwrt/bin/targets -name "*factory.ubi" -exec cp {} out/ \; 2>/dev/null || true
           find openwrt/bin/targets -name "sha256sums" -exec cp {} out/ \; 2>/dev/null || true
           find openwrt/bin/targets -name "config.buildinfo" -exec cp {} out/ \; 2>/dev/null || true
+          find openwrt/bin/targets -name "*.manifest" -exec cp {} out/ \; 2>/dev/null || true
           echo "--- 产物清单 ---"
           ls -lh out/
           sha256sum out/* || true
