@@ -224,6 +224,19 @@ jobs:
             exit 1
           fi
 
+      # dl/ 是纯输入：make download 按 PKG_SOURCE 的文件名往里放 tarball，不参与编译判定，
+      # 所以缓存它不会像 staging_dir 那样让别的包链到错的东西。
+      # 必须放在「下载依赖源码」之前恢复：这一步之后 dl/ 才被填满，保存由本 action 的 post 步负责。
+      - name: 恢复 dl 缓存
+        uses: actions/cache@v4
+        with:
+          path: /mnt/ax6build/openwrt/dl
+          # 精确 key 由仓库状态算出：ax6.config 或本文件不变就命中上一次的归档、不产生新条目；
+          # 变了也只是换一个 key，restore-keys 仍按前缀捞回旧 tarball，make download 只补缺的。
+          key: dl-${{ hashFiles('ax6.config') }}-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            dl-
+
       - name: 下载依赖源码
         run: |
           cd openwrt
@@ -343,6 +356,10 @@ jobs:
           echo "--- 产物清单 ---"
           ls -lh out/
           sha256sum out/* || true
+          # 量体积：给缓存策略留真实数据（只加打印，不新增步骤）
+          echo "--- 缓存与下载体积 ---"
+          du -sh openwrt/.ccache openwrt/dl 2>/dev/null || true
+          echo "dl 文件数: $(ls openwrt/dl 2>/dev/null | wc -l)"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
