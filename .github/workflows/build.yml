@@ -10,7 +10,9 @@ name: Build AX6 NSS Firmware
 #      第三方 app：argon 主题、openclash、mosdns、turboacc、vlmcsd、cpufreq、autocore、coremark、default-settings。
 #   3. luci feed 指向 immortalwrt 的 openwrt-25.12（与 ax6.config 里的 LuCI 选择同源）。
 #   4. ax6.config 启用 WireGuard 四包、tailscale（含 kmod-tun）、luci-ssl-openssl、
-#      kmod-nf-nathelper 三件套、kmod-thermal。
+#      kmod-nf-nathelper 与 -extra。
+#      （热控 CONFIG_THERMAL=y 本来就在 target/linux/qualcommax/config-6.12，
+#        不需要 kmod-thermal 包，也无此包。）
 #
 # 用法：仓库 Actions 页 -> Build AX6 NSS Firmware -> Run workflow
 
@@ -43,7 +45,13 @@ jobs:
       # 第三方包来源（TerryLip 树内 package/new、package/emortal）
       EXTRAPKG_REPO: TerryLip/AX6NSS-qosmio
       EXTRAPKG_REF: qualcommax-6.x-nss-wifi
-      CCACHE_DIR: /mnt/ax6build/.ccache
+      # ccache 放到 74G 临时盘，避免挤占根分区。
+      # 关键：OpenWrt 的 rules.mk 第 355 行会强制
+      #   export CCACHE_DIR := $(if $(CONFIG_CCACHE_DIR), $(CONFIG_CCACHE_DIR), $(TOPDIR)/.ccache)
+      # 而 ax6.config 里 CONFIG_CCACHE_DIR=""，TOPDIR 就是 /mnt/ax6build/openwrt，
+      # 所以 ccache 实际写在 /mnt/ax6build/openwrt/.ccache。job 级的 env 会被 make 覆盖，
+      # 因此下面的 env 与 actions/cache 的 path 都必须指向这个真实目录，否则缓存每轮白传。
+      CCACHE_DIR: /mnt/ax6build/openwrt/.ccache
 
     steps:
       - name: 检出本仓库
@@ -83,7 +91,6 @@ jobs:
           BUILD_ROOT=/mnt/ax6build
           sudo mkdir -p "$BUILD_ROOT"
           sudo chown -R "$(id -u):$(id -g)" "$BUILD_ROOT"
-          mkdir -p "$BUILD_ROOT/.ccache"
           echo "--- 磁盘 ---"
           df -h / /mnt
           echo "源码: $SOURCE_REPO  分支: $SOURCE_REF"
@@ -102,13 +109,21 @@ jobs:
       - name: 恢复 ccache
         uses: actions/cache@v4
         with:
-          path: /mnt/ax6build/.ccache
+          # 与 rules.mk 里 CCACHE_DIR 的落盘位置一致（$(TOPDIR)/.ccache）
+          path: /mnt/ax6build/openwrt/.ccache
           key: ccache-qosmio2512-${{ github.run_id }}
           restore-keys: |
             ccache-qosmio2512-
 
       - name: 更新 feeds（luci 指向 immortalwrt openwrt-25.12）
         run: |
+          # 先把 ccache 容量钉住：本树 rules.mk 强制 CCACHE_NOCOMPRESS=true（缓存不压缩），
+          # 不设上限会一路涨到默认值，与 74G 构建树抢空间。放在恢复后执行，避免被缓存里的
+          # 旧 ccache.conf 覆盖。这里不新增步骤，保持下文「第 N 步」的编号不变。
+          mkdir -p /mnt/ax6build/openwrt/.ccache
+          ccache --max-size=4G
+          echo "--- ccache 配置 ---"
+          (ccache --show-config 2>/dev/null || ccache -p) | grep -iE 'max_size|compress' || true
           cd openwrt
           # 【为什么单独换 luci】
           # qosmio 25.12-nss 的 feeds 全部锁在 openwrt-25.12，本身是自洽的；
@@ -272,6 +287,21 @@ jobs:
             exit 1
           fi
 
+      # dl/ 是纯输入：make download 按 PKG_SOURCE 的文件名往里放 tarball，不参与编译判定，
+      # 所以缓存它不会像 staging_dir 那样让别的包链到错的东西。
+      # 必须放在「下载依赖源码」之前恢复：这一步之后 dl/ 才被填满，保存由本 action 的 post 步负责。
+      # 换源码树后 dl 内容整体不同（qosmio 25.12 的 tarball 版本与旧树不一致），
+      # 旧 key 一律不会命中，第一轮必然全量下载——这是预期行为。
+      - name: 恢复 dl 缓存
+        uses: actions/cache@v4
+        with:
+          path: /mnt/ax6build/openwrt/dl
+          # 精确 key 由仓库状态算出：ax6.config 或本文件不变就命中上一次的归档、不产生新条目；
+          # 变了也只是换一个 key，restore-keys 仍按前缀捞回旧 tarball，make download 只补缺的。
+          key: dl-${{ hashFiles('ax6.config') }}-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            dl-
+
       - name: 下载依赖源码
         run: |
           cd openwrt
@@ -289,12 +319,14 @@ jobs:
           echo "== 并行编译失败，串行 V=s 重试（保留首个错误现场） =="
           cp /tmp/build.log /tmp/build_parallel.log
           free -h; df -h /
-          make -j1 V=s 2>&1 | tee /tmp/build_serial.log || true
+          # 串行全量重编比并行慢 3 倍以上，必须限时：一旦把 job 顶到 350 分钟超时，
+          # 下面的失败诊断、logs 分支、日志 artifact 全都不会执行，最需要日志时恰好没有。
+          timeout 45m make -j1 V=s 2>&1 | tee /tmp/build_serial.log || true
           cp /tmp/build_serial.log /tmp/build.log
           exit 1
 
       - name: 失败诊断
-        if: failure()
+        if: failure() || cancelled()
         run: |
           LOG=/tmp/build.log
           [ -f "$LOG" ] || LOG=/tmp/build_serial.log
@@ -311,7 +343,7 @@ jobs:
             echo '```'
             echo "### 匹配到的错误行（末尾 40 条）"
             echo '```'
-            grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|fatal error|undefined reference|unable to select packages|breaks:|missing dependencies" "$LOG" 2>/dev/null | tail -40 || echo "(未匹配到关键字)"
+            grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|make.*\*\*\*|fatal error|undefined reference|unable to select packages|breaks:|^Package .* is missing dependencies" "$LOG" 2>/dev/null | tail -40 || echo "(未匹配到关键字)"
             echo '```'
             echo "### 依赖冲突区块（若有）"
             echo '```'
@@ -322,14 +354,14 @@ jobs:
             tail -120 "$LOG" 2>/dev/null
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|undefined reference" "$LOG" 2>/dev/null \
+          grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|make.*\*\*\*|undefined reference" "$LOG" 2>/dev/null \
             | tail -8 | while IFS= read -r l; do echo "::error title=build-error::$l"; done
           mkdir -p out
           tail -c 3000000 "$LOG" > out/build-tail.log 2>/dev/null || true
           echo "诊断已写入 job summary"
 
       - name: 发布失败日志到 logs 分支
-        if: failure()
+        if: failure() || cancelled()
         run: |
           set +e
           LOG=/tmp/build.log
@@ -348,7 +380,7 @@ jobs:
             grep -n -B1 -A12 "breaks:" "$LOG" | head -120
             echo
             echo "########## 错误行（末尾 80） ##########"
-            grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|undefined reference|missing dependencies|Conflicting|WARNING: Makefile" "$LOG" | tail -80
+            grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|make.*\*\*\*|undefined reference|^Package .* is missing dependencies|Conflicting|WARNING: Makefile" "$LOG" | tail -80
             echo
             echo "########## 日志末尾 800 行 ##########"
             tail -800 "$LOG"
@@ -366,7 +398,7 @@ jobs:
             echo "已发布到 logs 分支" || echo "发布失败（不影响主流程）"
 
       - name: 上传编译日志（仅失败时）
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
@@ -385,6 +417,10 @@ jobs:
           echo "--- 产物清单 ---"
           ls -lh out/
           sha256sum out/* || true
+          # 量体积：给缓存策略留真实数据（只加打印，不新增步骤）
+          echo "--- 缓存与下载体积 ---"
+          du -sh openwrt/.ccache openwrt/dl 2>/dev/null || true
+          echo "dl 文件数: $(ls openwrt/dl 2>/dev/null | wc -l)"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
