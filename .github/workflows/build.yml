@@ -36,8 +36,13 @@ jobs:
     env:
       # push 触发时 inputs 为空，这里兜底成作者默认分支
       SOURCE_REF: ${{ github.event.inputs.source_ref || 'qualcommax-6.x-nss-wifi' }}
-      # ccache 放到 74G 临时盘，避免挤占根分区
-      CCACHE_DIR: /mnt/ax6build/.ccache
+      # ccache 放到 74G 临时盘，避免挤占根分区。
+      # 关键：OpenWrt 的 rules.mk 第 355 行会强制
+      #   export CCACHE_DIR := $(if $(CONFIG_CCACHE_DIR), $(CONFIG_CCACHE_DIR), $(TOPDIR)/.ccache)
+      # 而 ax6.config 里 CONFIG_CCACHE_DIR=""，TOPDIR 就是 /mnt/ax6build/openwrt，
+      # 所以 ccache 实际写在 /mnt/ax6build/openwrt/.ccache。job 级的 env 会被 make 覆盖，
+      # 因此下面的 env 与 actions/cache 的 path 都必须指向这个真实目录，否则缓存每轮白传。
+      CCACHE_DIR: /mnt/ax6build/openwrt/.ccache
 
     steps:
       # 注意：必须先检出本仓库，才能拿到 ax6.config；
@@ -96,13 +101,21 @@ jobs:
       - name: 恢复 ccache
         uses: actions/cache@v4
         with:
-          path: /mnt/ax6build/.ccache
+          # 与 rules.mk 里 CCACHE_DIR 的落盘位置一致（$(TOPDIR)/.ccache）
+          path: /mnt/ax6build/openwrt/.ccache
           key: ccache-${{ github.run_id }}
           restore-keys: |
             ccache-
 
       - name: 更新 feeds（luci 固定到 immortalwrt openwrt-25.12）
         run: |
+          # 先把 ccache 容量钉住：本树 rules.mk 强制 CCACHE_NOCOMPRESS=true（缓存不压缩），
+          # 不设上限会一路涨到默认值，与 74G 构建树抢空间。放在恢复后执行，避免被缓存里的
+          # 旧 ccache.conf 覆盖。这里不新增步骤，保持下文「第 N 步」的编号不变。
+          mkdir -p /mnt/ax6build/openwrt/.ccache
+          ccache --max-size=4G
+          echo "--- ccache 配置 ---"
+          (ccache --show-config 2>/dev/null || ccache -p) | grep -iE 'max_size|compress' || true
           cd openwrt
           # 【为什么要换 luci feed 的来源】
           # 作者 README 要求用 immortalwrt 的 LuCI 覆盖源码树自带的官方 LuCI
@@ -228,14 +241,16 @@ jobs:
           echo "== 并行编译失败，串行 V=s 重试（保留首个错误现场） =="
           cp /tmp/build.log /tmp/build_parallel.log
           free -h; df -h /
-          make -j1 V=s 2>&1 | tee /tmp/build_serial.log || true
+          # 串行全量重编比并行慢 3 倍以上，必须限时：一旦把 job 顶到 350 分钟超时，
+          # 下面的失败诊断、logs 分支、日志 artifact 全都不会执行，最需要日志时恰好没有。
+          timeout 45m make -j1 V=s 2>&1 | tee /tmp/build_serial.log || true
           cp /tmp/build_serial.log /tmp/build.log
           exit 1
 
       # 失败时把关键错误写进 job summary + annotation
       # annotation 与 check-run summary 无需登录即可通过 API 读取，便于远程诊断
       - name: 失败诊断
-        if: failure()
+        if: failure() || cancelled()
         run: |
           LOG=/tmp/build.log
           [ -f "$LOG" ] || LOG=/tmp/build_serial.log
@@ -252,7 +267,7 @@ jobs:
             echo '```'
             echo "### 匹配到的错误行（末尾 40 条）"
             echo '```'
-            grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|fatal error|undefined reference|unable to select packages|breaks:|missing dependencies" "$LOG" 2>/dev/null | tail -40 || echo "(未匹配到关键字)"
+            grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|make.*\*\*\*|fatal error|undefined reference|unable to select packages|breaks:|^Package .* is missing dependencies" "$LOG" 2>/dev/null | tail -40 || echo "(未匹配到关键字)"
             echo '```'
             echo "### 依赖冲突区块（若有）"
             echo '```'
@@ -263,7 +278,7 @@ jobs:
             tail -120 "$LOG" 2>/dev/null
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|undefined reference" "$LOG" 2>/dev/null \
+          grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|make.*\*\*\*|undefined reference" "$LOG" 2>/dev/null \
             | tail -8 | while IFS= read -r l; do echo "::error title=build-error::$l"; done
           mkdir -p out
           tail -c 3000000 "$LOG" > out/build-tail.log 2>/dev/null || true
@@ -272,7 +287,7 @@ jobs:
       # 把失败日志摘要推到 logs 分支：仓库是公开的，raw 链接无需登录即可读取，
       # 省去「下载 artifact / 截图日志」这一环。
       - name: 发布失败日志到 logs 分支
-        if: failure()
+        if: failure() || cancelled()
         run: |
           set +e
           LOG=/tmp/build.log
@@ -291,7 +306,7 @@ jobs:
             grep -n -B1 -A12 "breaks:" "$LOG" | head -120
             echo
             echo "########## 错误行（末尾 80） ##########"
-            grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|undefined reference|missing dependencies|Conflicting|WARNING: Makefile" "$LOG" | tail -80
+            grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|make.*\*\*\*|undefined reference|^Package .* is missing dependencies|Conflicting|WARNING: Makefile" "$LOG" | tail -80
             echo
             echo "########## 日志末尾 800 行 ##########"
             tail -800 "$LOG"
@@ -309,7 +324,7 @@ jobs:
             echo "已发布到 logs 分支" || echo "发布失败（不影响主流程）"
 
       - name: 上传编译日志（仅失败时）
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
