@@ -1,0 +1,243 @@
+name: Build AX6 PPE-NSS Firmware
+
+# 第三条线：ppe-nss(Linux 6.18) + Redmi AX6 单槽 stock 布局 + NSS FW 12.5
+# 与主线的区别：
+#   主线 build.yml      → qosmio 6.12.91 + ECM 加速（已验证 NSS/ECM/WireGuard）
+#   本线 build-ppe.yml  → ppe-nss 6.18 + PPE/EDMA 有线 + NSS WiFi（无 ECM）
+# 两线互斥：ECM 与 PPE 是两套数据面架构，不能同时装。
+#
+# 只允许手动触发，不进 push 路径，避免和主线的 62 分钟编译抢并发。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ppe_sha:
+        description: 'ppe-nss 源码 commit（留空用默认 7d65a3e）'
+        required: false
+        default: '7d65a3ed836a0071e2f19a5944682f457e02efe0'
+      tiny_sha:
+        description: 'AX6-OpenWrt-Tiny 仓库 commit（提供 stock 移植脚本）'
+        required: false
+        default: '57e4ff319099af7683c2d0df1904b55a5a0c193e'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ax6-ppe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: PPE 6.18 / AX6 stock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      PPE_SOURCE_SHA: ${{ inputs.ppe_sha }}
+      TINY_SHA: ${{ inputs.tiny_sha }}
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: 检出本仓库
+        uses: actions/checkout@v4
+
+      - name: 运行环境信息
+        run: |
+          echo "run=${{ github.run_id }} ref=${{ github.ref }}"
+          echo "ppe=$PPE_SOURCE_SHA tiny=$TINY_SHA"
+          df -h /; free -h; nproc
+
+      - name: 清理磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/share/swift \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost 2>/dev/null || true
+          sudo swapoff -a 2>/dev/null || true
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3 python3-setuptools \
+            python3-pyelftools rsync unzip zlib1g-dev file wget swig time curl \
+            xz-utils zstd subversion libelf-dev ca-certificates squashfs-tools
+          sudo apt-get clean
+
+      - name: 拉取 AX6-OpenWrt-Tiny（stock 移植脚本来源）
+        run: |
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/Steven-ZYC/AX6-OpenWrt-Tiny.git tiny-repo
+          git -C tiny-repo fetch --depth=1 origin "$TINY_SHA"
+          git -C tiny-repo checkout --detach "$TINY_SHA"
+          [[ "$(git -C tiny-repo rev-parse HEAD)" == "$TINY_SHA" ]]
+          echo "TINY_REPO=$PWD/tiny-repo" >> "$GITHUB_ENV"
+          ls tiny-repo/scripts/ | head -20
+
+      - name: 拉取 ppe-nss 源码（钉 commit）
+        run: |
+          git clone --depth 1 --single-branch --branch ppe-nss \
+            https://github.com/JuliusBairaktaris/openwrt-ppe-nss.git ppe-source
+          if [[ "$(git -C ppe-source rev-parse HEAD)" != "$PPE_SOURCE_SHA" ]]; then
+            git -C ppe-source fetch --depth=1 origin "$PPE_SOURCE_SHA"
+            git -C ppe-source checkout --detach "$PPE_SOURCE_SHA"
+          fi
+          [[ "$(git -C ppe-source rev-parse HEAD)" == "$PPE_SOURCE_SHA" ]]
+          git -C ppe-source log -1 --format='ppe-nss: %h %ci %s'
+          grep -Fqx 'KERNEL_PATCHVER:=6.18' ppe-source/target/linux/qualcommax/Makefile \
+            || { echo "::error::ppe-nss 内核已不是 6.18，脚本锚点需复核"; exit 1; }
+
+      - name: 恢复 ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ppe-source/.ccache
+          key: ccache-ppe2618-${{ github.run_id }}
+          restore-keys: |
+            ccache-ppe2618-
+
+      - name: 恢复 dl 缓存
+        id: dl-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ppe-source/dl
+          key: dl-ppe2618-${{ hashFiles('ppe/configs/ax6-ppe-nss.config') }}
+          restore-keys: |
+            dl-ppe2618-
+
+      - name: 源准备（stock 移植 + nss feed + argon + 单槽容错）
+        working-directory: ppe-source
+        run: |
+          mkdir -p .ccache
+          printf 'ccache_dir=%s\nmax_size=4G\ncompression=false\n' "$PWD/.ccache" > /tmp/ccache.conf
+          export CCACHE_CONFIGPATH=/tmp/ccache.conf
+          bash ../ppe/scripts/prepare.sh
+
+      - name: 应用编译配置
+        working-directory: ppe-source
+        run: |
+          cp ../ppe/configs/ax6-ppe-nss.config .config
+          make defconfig
+          cp .config ../build.config
+          echo "--- 设备选择 ---"
+          grep -E '^CONFIG_TARGET_qualcommax_ipq807x_DEVICE_' .config
+
+      - name: 校验核心功能包（缺失即中止）
+        working-directory: ppe-source
+        run: |
+          set -e
+          fail=0
+          check() {
+            if grep -qx "CONFIG_PACKAGE_$1=y" .config; then
+              echo "OK   $1"
+            else
+              echo "::error::缺少 $1（$2）"; fail=1
+            fi
+          }
+          check kmod-nss-wifi-drv     "NSS WiFi 驱动"
+          check nss-firmware-ipq807x  "NSS 固件 blob"
+          check kmod-wireguard        "WireGuard 内核模块"
+          check wireguard-tools       "wg 用户态"
+          check luci-proto-wireguard  "LuCI WireGuard 页面"
+          check kmod-tun              "tailscale 依赖的 TUN"
+          check tailscale             "tailscale"
+          check luci-ssl              "HTTPS 管理页"
+          check luci-theme-argon      "Argon 主题"
+          check firewall4             "fw4"
+
+          echo "--- 必须存在的架构开关 ---"
+          for kv in 'CONFIG_NSS_FIRMWARE_VERSION_12_5=y' \
+                    'CONFIG_ATH11K_NSS_WIFI=y'; do
+            grep -qx "$kv" .config && echo "OK   $kv" || { echo "::error::缺少 $kv"; fail=1; }
+          done
+
+          echo "--- 必须不存在的旧栈 ---"
+          for kv in 'CONFIG_PACKAGE_qca-nss-ecm' 'CONFIG_PACKAGE_kmod-shortcut-fe'; do
+            if grep -qx "$kv=y" .config; then
+              echo "::error::$kv 不应启用（PPE 架构下互斥）"; fail=1
+            else
+              echo "OK   $kv 未启用"
+            fi
+          done
+
+          [[ $fail -eq 0 ]] || exit 1
+
+      - name: 下载依赖源码
+        working-directory: ppe-source
+        run: |
+          make download -j8 || make download -j1 V=s
+          find dl -type f -size -1024c -print 2>/dev/null || true
+          df -h /
+
+      - name: 编译固件
+        working-directory: ppe-source
+        run: |
+          export CCACHE_CONFIGPATH=/tmp/ccache.conf
+          make -j"$(nproc)" V=s 2>&1 | tee /tmp/build.log
+
+      - name: 失败诊断
+        if: failure() || cancelled()
+        run: |
+          LOG=/tmp/build.log
+          [[ -f "$LOG" ]] || { echo "(无构建日志)"; exit 0; }
+          echo "===== 日志尾部 120 行 ====="
+          tail -120 "$LOG" || true
+          echo "===== 关键错误 ====="
+          grep -nE "error:|Error [0-9]|ERROR:|No space left|Killed|make.*\*\*\*|undefined reference|missing dependencies|Conflicts|failed to build" "$LOG" \
+            | tail -50 || echo "(未匹配)"
+
+      - name: 上传编译日志（仅失败时）
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppe-build-log-${{ github.run_id }}
+          path: /tmp/build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 校验并归集产物
+        working-directory: ppe-source
+        run: |
+          TARGET=bin/targets/qualcommax/ipq807x
+          shopt -s nullglob
+          factories=("$TARGET"/*redmi_ax6-stock*squashfs-factory.ubi)
+          upgrades=("$TARGET"/*redmi_ax6-stock*squashfs-sysupgrade.bin)
+          manifests=("$TARGET"/*redmi_ax6-stock*.manifest)
+          echo "factory=${#factories[@]} sysupgrade=${#upgrades[@]} manifest=${#manifests[@]}"
+          (( ${#factories[@]} == 1 && ${#upgrades[@]} == 1 && ${#manifests[@]} == 1 )) || {
+            echo "::error::产物不唯一，检查设备定义"; ls -la "$TARGET" | head -30; exit 1; }
+
+          mkdir -p ../out
+          python3 ../ppe/scripts/check-stock-image.py "${upgrades[0]}" "${factories[0]}" \
+            | tee ../out/IMAGE-AUDIT.md
+          cp "${factories[0]}" ../out/AX6-ppe-nss-factory.ubi
+          cp "${upgrades[0]}"  ../out/AX6-ppe-nss-sysupgrade.bin
+          cp "${manifests[0]}" ../out/AX6-ppe-nss.manifest
+          cp .config ../out/build.config
+          cp ../out/IMAGE-AUDIT.md ../out/AX6-ppe-nss-IMAGE-AUDIT.md
+          echo 'EXPERIMENTAL - 未在真机验证 PPE/NSS 转发、WiFi、boot 与回滚。' > ../out/UNVERIFIED.txt
+          ( cd ../out && sha256sum *.ubi *.bin > SHA256SUMS )
+          echo "--- 体积 ---"
+          ls -lh ../out/
+
+      - name: 保存 ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ppe-source/.ccache
+          key: ccache-ppe2618-${{ github.run_id }}
+
+      - name: 保存 dl 缓存
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ppe-source/dl
+          key: dl-ppe2618-${{ hashFiles('ppe/configs/ax6-ppe-nss.config') }}
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax6-ppe-nss-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 30

@@ -66,3 +66,22 @@ openwrt-25.12 的 packages feed 自带 `golang1.27`，满足 tailscale 1.104.1 �
 - 配置：`libwrt/configs/libwrt-ax6.config`
 - 细节与风险：`libwrt/README.md`
 
+## 第三条线：ppe-nss 6.18（PPE/EDMA，与 ECM 互斥）
+
+`ppe/` 下是第三条编译线，基座 `JuliusBairaktaris/openwrt-ppe-nss` @`7d65a3e`（内核 **6.18**）。
+与前两条的本质区别：**不装 `qca-nss-ecm`**，有线转发交给内核 PPE/EDMA，无线交给 NSS WiFi 驱动。
+三条线里只有一条能刷，ECM 与 PPE 不能同时装。
+
+相对上游 `Steven-ZYC/AX6-OpenWrt-Tiny` 改了三处：
+
+1. **体积 gate 28 → 64 MiB**：28 MiB 是原厂 A/B 单槽（35.75 MiB）的保守值，本机 mtd12 实测 102.25 MiB
+2. **单槽容错**：上游 `part_num="$(fw_printenv -n flag_boot_rootfs)" || return 1` 在本机会直接拒刷
+   （本机 U-Boot 没有 `flag_boot_rootfs`），已改为空值按 0 处理
+3. **NSS 固件 11.4.0.5-R6 → 12.5-R210**：一个 `CONFIG_NSS_FIRMWARE_VERSION_12_5` 同时切换固件与驱动
+   （驱动 Makefile 里只有 11_4 才降级到 2021 源码）。代价是不支持 802.11s mesh
+
+- 触发方式：Actions → **Build AX6 PPE-NSS Firmware** → Run workflow（**只手动触发**）
+- 配置：`ppe/configs/ax6-ppe-nss.config`
+- 细节、风险与验收：`ppe/README.md`
+
+
