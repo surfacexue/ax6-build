@@ -49,5 +49,20 @@ openwrt-25.12 的 packages feed 自带 `golang1.27`，满足 tailscale 1.104.1 �
 
 - `make menuconfig` 在 CI 里无法交互，用 `make defconfig` 代替。
 - 产物名是 `openwrt-qualcommax-ipq807x-redmi_ax6-stock-squashfs-sysupgrade.bin`，
-  **必须含 `-stock`**，这是原厂分区；不带 `-stock` 的是扩容布局，刷了会 brick。
+  **必须含 `-stock`**。命名容易误解：`-stock` 指**单卷 UBI**（custom U-Boot、大分区，
+  rootfs 102 MiB，本机 `board_name=redmi,ax6-stock`）；不带 `-stock` 的 `redmi_ax6` 是
+  **kernel 36 MB + rootfs 双卷**（expand layout）。两者互刷会 brick。
 - 详细背景、风险清单、验收步骤见 `交接文档/qosmio-25.12-nss-移植说明.md`。
+- 外部方案对比（Julius / LibWrt / Steven-ZYC / llz121517 等）见
+  `交接文档/外部NSS方案调研-20261124.md`。
+
+## 平行分支：LibWrt 25.12-nss
+
+`libwrt/` 下是第二条编译线，用 `LiBwrt/LibWrt` 的 `25.12-nss`（内核 **6.12.116**）。
+它的 `redmi_ax6-stock` 是树内原生的，luci/packages 本来就指向 immortalwrt 25.12，
+所以主线那三处 workaround（换 luci、换 Go、修 px5g 死依赖）在这条线上都不需要。
+
+- 触发方式：Actions → **Build AX6 LibWrt NSS Firmware** → Run workflow（**只手动触发**）
+- 配置：`libwrt/configs/libwrt-ax6.config`
+- 细节与风险：`libwrt/README.md`
+
