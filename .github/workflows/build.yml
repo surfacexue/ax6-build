@@ -339,6 +339,21 @@ jobs:
         run: |
           LOG=/tmp/build.log
           [ -f "$LOG" ] || LOG=/tmp/build_serial.log
+          # 失败发生在编译之前（配置/校验步）时两个日志都不存在；此处必须兜底，
+          # 否则后面 tail 一个不存在的文件会让本步自己也 exit 1，
+          # 日志 artifact 与 job summary 全都拿不到（LibWrt 首轮就是这样丢了全部日志）。
+          if [ ! -f "$LOG" ]; then
+            {
+              echo "## 编译失败诊断"
+              echo ""
+              echo "编译未启动：失败发生在前面的准备/配置/校验步骤，没有 build.log。"
+              echo "请查看该 job 的 Annotations（::error:: 标注）定位具体原因。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=no-build-log::编译未启动，无 build.log，请看上一步的 ::error:: 标注"
+            mkdir -p out
+            echo "编译未启动，无 build.log。" > out/build-tail.log
+            exit 0
+          fi
           {
             echo "## 编译失败诊断"
             echo ""
