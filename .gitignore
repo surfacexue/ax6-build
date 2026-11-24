@@ -1,0 +1,6 @@
+# 下载的固件产物，不入库（单个 100MB 级，接近 GitHub 单文件上限）
+*.zip
+*.bin
+*.ubi
+*.itb
+*.tar.gz

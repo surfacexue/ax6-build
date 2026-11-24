@@ -1,52 +1,51 @@
 name: Build AX6 NSS Firmware
 # trigger-marker: 3
 
-# 云编译 TerryLip/AX6NSS-qosmio 的 Redmi AX6 (stock) 固件，
-# 相对上游的改动：启用 WireGuard 四个包 + tailscale（含 kmod-tun）。
+# 云编译 qosmio/openwrt-ipq 的 25.12-nss 分支，产出 Redmi AX6（原厂 stock 分区布局）固件。
+#
+# 相对上游（qosmio/openwrt-ipq）的四处改动，全部在本仓库内可见、可回滚：
+#   1. patches/0001-add-redmi-ax6-stock.patch
+#      上游只有 redmi_ax6（扩容布局），补上 redmi_ax6-stock（原厂布局）。
+#   2. 并入 TerryLip/AX6NSS-qosmio 的 package/new + package/emortal
+#      第三方 app：argon 主题、openclash、mosdns、turboacc、vlmcsd、cpufreq、autocore、coremark、default-settings。
+#   3. luci feed 指向 immortalwrt 的 openwrt-25.12（与 ax6.config 里的 LuCI 选择同源）。
+#   4. ax6.config 启用 WireGuard 四包、tailscale（含 kmod-tun）、luci-ssl-openssl、
+#      kmod-nf-nathelper 三件套、kmod-thermal。
 #
 # 用法：仓库 Actions 页 -> Build AX6 NSS Firmware -> Run workflow
 
 on:
-  # 推送即编译（无需 token / gh CLI）
   push:
     branches: [main]
     paths:
       - 'ax6.config'
       - '.github/workflows/build.yml'
-  # 也支持手动触发
+      - 'patches/**'
   workflow_dispatch:
     inputs:
       source_ref:
-        description: '源码分支/标签（默认作者默认分支）'
+        description: 'qosmio/openwrt-ipq 的分支/标签'
         required: false
-        default: 'qualcommax-6.x-nss-wifi'
+        default: '25.12-nss'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    # 失败时要把日志推到 logs 分支（公开可读），因此需要写权限
     permissions:
       contents: write
-    # 新提交自动取消仍在运行的旧任务，避免白白占额度
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: true
-    # GitHub 单个 job 上限 6 小时，留 10 分钟余量
     timeout-minutes: 350
     env:
-      # push 触发时 inputs 为空，这里兜底成作者默认分支
-      SOURCE_REF: ${{ github.event.inputs.source_ref || 'qualcommax-6.x-nss-wifi' }}
-      # ccache 放到 74G 临时盘，避免挤占根分区。
-      # 关键：OpenWrt 的 rules.mk 第 355 行会强制
-      #   export CCACHE_DIR := $(if $(CONFIG_CCACHE_DIR), $(CONFIG_CCACHE_DIR), $(TOPDIR)/.ccache)
-      # 而 ax6.config 里 CONFIG_CCACHE_DIR=""，TOPDIR 就是 /mnt/ax6build/openwrt，
-      # 所以 ccache 实际写在 /mnt/ax6build/openwrt/.ccache。job 级的 env 会被 make 覆盖，
-      # 因此下面的 env 与 actions/cache 的 path 都必须指向这个真实目录，否则缓存每轮白传。
-      CCACHE_DIR: /mnt/ax6build/openwrt/.ccache
+      SOURCE_REPO: qosmio/openwrt-ipq
+      SOURCE_REF: ${{ github.event.inputs.source_ref || '25.12-nss' }}
+      # 第三方包来源（TerryLip 树内 package/new、package/emortal）
+      EXTRAPKG_REPO: TerryLip/AX6NSS-qosmio
+      EXTRAPKG_REF: qualcommax-6.x-nss-wifi
+      CCACHE_DIR: /mnt/ax6build/.ccache
 
     steps:
-      # 注意：必须先检出本仓库，才能拿到 ax6.config；
-      # 作者源码用 git clone 单独拉到 openwrt/ 子目录。
       - name: 检出本仓库
         uses: actions/checkout@v4
 
@@ -87,114 +86,126 @@ jobs:
           mkdir -p "$BUILD_ROOT/.ccache"
           echo "--- 磁盘 ---"
           df -h / /mnt
-          echo "目标分支: $SOURCE_REF"
+          echo "源码: $SOURCE_REPO  分支: $SOURCE_REF"
           git clone --depth 1 --branch "$SOURCE_REF" \
-            https://github.com/TerryLip/AX6NSS-qosmio.git "$BUILD_ROOT/openwrt"
+            "https://github.com/$SOURCE_REPO.git" "$BUILD_ROOT/openwrt"
           ln -sfn "$BUILD_ROOT/openwrt" openwrt
           cd openwrt
-          echo "--- 实际路径 ---"
-          pwd -P
           echo "--- 源码 HEAD ---"
           git log -1 --oneline
+          echo "--- 内核版本 ---"
+          cat target/linux/generic/kernel-6.12 2>/dev/null | head -2
+          echo "--- mac80211 backports 版本 ---"
+          sed -n 's/^PKG_VERSION:=//p' package/kernel/mac80211/Makefile | head -1
           du -sh .
 
       - name: 恢复 ccache
         uses: actions/cache@v4
         with:
-          # 与 rules.mk 里 CCACHE_DIR 的落盘位置一致（$(TOPDIR)/.ccache）
-          path: /mnt/ax6build/openwrt/.ccache
-          key: ccache-${{ github.run_id }}
+          path: /mnt/ax6build/.ccache
+          key: ccache-qosmio2512-${{ github.run_id }}
           restore-keys: |
-            ccache-
+            ccache-qosmio2512-
 
-      - name: 更新 feeds（luci 固定到 immortalwrt openwrt-25.12）
+      - name: 更新 feeds（luci 指向 immortalwrt openwrt-25.12）
         run: |
-          # 先把 ccache 容量钉住：本树 rules.mk 强制 CCACHE_NOCOMPRESS=true（缓存不压缩），
-          # 不设上限会一路涨到默认值，与 74G 构建树抢空间。放在恢复后执行，避免被缓存里的
-          # 旧 ccache.conf 覆盖。这里不新增步骤，保持下文「第 N 步」的编号不变。
-          mkdir -p /mnt/ax6build/openwrt/.ccache
-          ccache --max-size=4G
-          echo "--- ccache 配置 ---"
-          (ccache --show-config 2>/dev/null || ccache -p) | grep -iE 'max_size|compress' || true
           cd openwrt
-          # 【为什么要换 luci feed 的来源】
-          # 作者 README 要求用 immortalwrt 的 LuCI 覆盖源码树自带的官方 LuCI
-          # （源码树 feeds 指向 openwrt/project/luci，其 master 一直在跑）。
-          # 但 LuCI 的版本约束写在 feed 根部的 luci.mk 里，只换 modules/ 下的
-          # 几个模块没用：
-          #   - master 的 luci.mk 有 LUCI_UT_MIN_UCODE=2026.02.27，
-          #     会把模板编成 ucode 字节码（format 0x02），而本树 ucode 是
-          #     2025.05.11 → package/install 报
-          #     "ucode-2025.05.11 breaks luci-base[...ucode>=2026.02.27]"
-          #   - openwrt-25.12 的 luci.mk 完全没有 UT/字节码约束，
-          #     且 luci-base 依赖的 ucode-mod-html 由 LuCI 自己的
-          #     contrib/package/ucode-mod-html 提供（不是主线 ucode 的模块），
-          #     所以依赖可以正常解析
-          # 因此把整个 luci feed 指到 immortalwrt 的 openwrt-25.12 分支。
+          # 【为什么单独换 luci】
+          # qosmio 25.12-nss 的 feeds 全部锁在 openwrt-25.12，本身是自洽的；
+          # 但 ax6.config 里的 LuCI 选择（argon 主题、argon-config、openclash、
+          # vlmcsd、turboacc 等）来自 immortalwrt 的 LuCI 分支，官方 LuCI 里没有
+          # argon 主题。为了让编译出的界面与当前在跑的固件一致，只把 luci 换成
+          # immortalwrt；packages/routing/telephony/video 保持 openwrt-25.12。
+          # immortalwrt 的 luci.mk 无 LUCI_UT_MIN_UCODE 约束，不会把模板编成
+          # ucode 字节码（那是我们之前踩过的坑）。
           if [ -f feeds.conf ]; then rm -f feeds.conf; fi
           sed -i 's#^src-git luci .*#src-git luci https://github.com/immortalwrt/luci.git;openwrt-25.12#' feeds.conf.default
-          echo "--- feeds.conf.default 中的 luci 行 ---"
-          grep -n '^src-git luci' feeds.conf.default
+          echo "--- feeds.conf.default ---"
+          grep -E '^src-git' feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 替换 golang 并校验 LuCI 来源（作者要求，改用 git 替代已停服的 svn）
+      - name: 并入第三方包并应用 AX6 stock 补丁
         run: |
           set -e
-          cd "$GITHUB_WORKSPACE/openwrt"
+          cd openwrt
 
-          # LuCI 的来源已在上一步通过 feeds.conf.default 固定为 immortalwrt
-          # 的 openwrt-25.12 分支，这里只做「就地校验 + golang 替换」。
-          # 只替换 modules/ 下几个模块是不够的：ucode 版本约束写在 feed 根部的
-          # luci.mk 里，换模块不换 luci.mk，约束依然生效。
-          test -f feeds/luci/luci.mk || { echo "::error::找不到 feeds/luci/luci.mk，luci feed 未正确拉取"; exit 1; }
+          # 1) 第三方包：argon/openclash/mosdns/turboacc/vlmcsd/cpufreq/autocore/coremark/default-settings
+          #    这些包 upstream(qosmio) 没有，TerryLip 树里是以树内 package 的形式维护的，
+          #    这里整目录并入，不占用本仓库体积。
+          git clone --depth 1 --branch "$EXTRAPKG_REF" \
+            "https://github.com/$EXTRAPKG_REPO.git" /tmp/extrapkg
+          mkdir -p package/new package/emortal
+          cp -a /tmp/extrapkg/package/new/. package/new/
+          cp -a /tmp/extrapkg/package/emortal/. package/emortal/
+          echo "--- 并入的目录 ---"
+          ls package/new package/emortal
 
-          # 校验 1：luci.mk 不得含字节码约束（含则表示要求 ucode >= 2026.02.27）
+          # 1b) mosdns 的 LuCI 界面不在这两者里，它由第三方 sbwml 维护
+          #     （immortalwrt 的 luci 与 packages 都只带 mosdns 本体，没有界面）。
+          #     只取 luci-app-mosdns 与它依赖的 geo2txt，mosdns 本体仍用 feed 的版本。
+          git clone --depth 1 --branch v5 \
+            https://github.com/sbwml/luci-app-mosdns.git /tmp/mosdns
+          cp -a /tmp/mosdns/luci-app-mosdns package/
+          cp -a /tmp/mosdns/geo2txt package/
+          echo "--- mosdns 界面 ---"
+          sed -n 's/^PKG_VERSION:=//p' package/luci-app-mosdns/Makefile
+          grep -E '^LUCI_DEPENDS' package/luci-app-mosdns/Makefile
+
+          # 2) 设备定义：补 redmi_ax6-stock（原厂分区布局）
+          PATCH="$GITHUB_WORKSPACE/patches/0001-add-redmi-ax6-stock.patch"
+          git apply --check -v "$PATCH"
+          git apply "$PATCH"
+          echo "--- 补丁结果 ---"
+          grep -A9 'define Device/redmi_ax6-stock' target/linux/qualcommax/image/ipq807x.mk
+
+      - name: 校验工具链与 LuCI 来源
+        run: |
+          set -e
+          cd openwrt
+
+          # LuCI 必须来自 immortalwrt，且不得含 ucode 字节码约束
+          test -f feeds/luci/luci.mk || { echo "::error::feeds/luci/luci.mk 缺失"; exit 1; }
           if grep -q 'LUCI_UT_MIN_UCODE' feeds/luci/luci.mk; then
-            echo "::error::luci.mk 含 LUCI_UT_MIN_UCODE，与源码树 ucode 2025.05.11 冲突"
+            echo "::error::luci.mk 含 LUCI_UT_MIN_UCODE，会强制 ucode 字节码，与本树 ucode 冲突"
             exit 1
           fi
           echo "OK  luci.mk 无 ucode 字节码约束"
-
-          # 校验 2：LuCI 依赖的 ucode-mod-html 由 luci feed 的 contrib 提供，
-          # 缺了会在 package/install 阶段以 Error 53 失败（apk 无法解析依赖）
-          if [ ! -f feeds/luci/contrib/package/ucode-mod-html/Makefile ]; then
-            echo "::error::缺少 feeds/luci/contrib/package/ucode-mod-html，依赖无法解析"
-            exit 1
-          fi
-          echo "OK  ucode-mod-html 由 feeds/luci/contrib 提供"
-
-          # 校验 3：打印 LuCI 实际版本，便于事后核对
-          grep -nE '^PKG_GITBRANCH|^LUCI_BRANCH' feeds/luci/luci.mk | head -3 || true
+          grep -E '^LUCI_BRANCH|^LUCI_RELEASE' feeds/luci/luci.mk | head -3 || true
           git -C feeds/luci log -1 --format='LuCI 提交: %h %ad %s' --date=short 2>/dev/null || true
 
-          # golang 换 sbwml 的 27.x 分支（原地替换，package/feeds 下的软链保持不变）
-          # 版本下限由 tailscale 决定，不是随便选的：
-          #   tailscale 1.104.6 的 go.mod 声明 `go 1.27.3`，并使用 Go 1.24 才引入的 tool 块
-          #   Go 1.23 → go: unknown block type: tool
-          #   Go 1.24~1.26 → go.mod requires go >= 1.27.3（GOTOOLCHAIN=local，不会自动下载）
-          # 降 tailscale 版本救不了：1.88.4 都要 go 1.25.1，1.96.5 要 1.26.1
-          rm -rf feeds/packages/lang/golang
-          git clone --depth 1 https://github.com/sbwml/packages_lang_golang \
-            -b 27.x feeds/packages/lang/golang
+          # 【必须修的一行】immortalwrt 的 luci-ssl-openssl 还依赖 px5g-openssl，
+          # 而 openwrt-25.12 已经把 px5g 拆成 px5g-mbedtls / px5g-wolfssl，
+          # px5g-openssl 在官方树和 immortalwrt packages 里都不存在（三方均 404）。
+          # 官方 luci openwrt-25.12 的同一文件写的是 +openssl-util，且包描述文本
+          # 本身就说「用 openssl 命令行工具生成证书，而不是默认的 px5g」。
+          # 因此这里改回 +openssl-util，与官方 25.12 对齐。
+          SSL_MK=feeds/luci/collections/luci-ssl-openssl/Makefile
+          test -f "$SSL_MK" || { echo "::error::找不到 $SSL_MK"; exit 1; }
+          if grep -q '+px5g-openssl' "$SSL_MK"; then
+            sed -i 's#+px5g-openssl#+openssl-util#' "$SSL_MK"
+            echo "已修正：+px5g-openssl -> +openssl-util（px5g-openssl 在 25.12 已移除）"
+          fi
+          grep -nE '^\s*\+(libustream|openssl|px5g)' "$SSL_MK" || true
+          if grep -q 'px5g-openssl' "$SSL_MK"; then
+            echo "::error::luci-ssl-openssl 仍然依赖不存在的 px5g-openssl"; exit 1
+          fi
 
-          # 硬校验 Go 版本，避免又一次跑到第 13 步才失败
-          GO_VER=$(sed -n 's/^GO_VERSION_MAJOR_MINOR:=//p' feeds/packages/lang/golang/golang/Makefile)
-          echo "Go 主版本: $GO_VER（tailscale 1.104.6 要求 >= 1.27）"
-          case "$GO_VER" in
-            1.2[7-9]|1.[3-9]*) echo "OK  Go 版本满足 tailscale 要求" ;;
-            *) echo "::error::Go $GO_VER 过低，tailscale 会因 go.mod 要求 1.27.3 而失败"; exit 1 ;;
-          esac
+          # argon 主题必须在（界面与当前系统一致的前提）
+          if [ -d feeds/luci/themes/luci-theme-argon ] || [ -d package/new/luci-theme-argon ]; then
+            echo "OK  argon 主题存在"
+          else
+            echo "::error::argon 主题缺失，LuCI 界面会与当前系统不一致"
+            exit 1
+          fi
 
-          rm -rf ./tmp
-
-          # 硬校验：替换件必须就位，否则直接失败而不是带病往下跑
-          for f in feeds/luci/modules/luci-base/Makefile \
-                   feeds/luci/modules/luci-mod-status/Makefile \
-                   feeds/packages/lang/golang/golang/Makefile; do
-            if [ -f "$f" ]; then echo "OK  $f"; else echo "::error::$f 缺失"; exit 1; fi
-          done
-          ls -d package/feeds/luci/luci-base package/feeds/luci/luci-mod-status package/feeds/packages/golang
+          # tailscale 需要 Go >= 1.27（其 go.mod 声明 go 1.27.3，且使用 Go 1.24 的 tool 块）
+          # openwrt-25.12 的 packages feed 自带 golang1.27，不需要再替换
+          test -d feeds/packages/lang/golang/golang1.27 || {
+            echo "::error::feeds/packages 里没有 golang1.27，tailscale 会编不过"; exit 1; }
+          echo "OK  golang1.27 由 openwrt-25.12 feed 提供"
+          grep -E 'GO_VERSION|golang1\.27' feeds/packages/lang/golang/golang-version.mk 2>/dev/null | head -5 || true
+          grep -q 'golang1\.27' feeds/packages/net/tailscale/Makefile && echo "OK  tailscale 依赖 golang1.27"
 
       - name: 应用编译配置
         run: |
@@ -203,39 +214,63 @@ jobs:
           make defconfig
           echo "--- 目标设备 ---"
           grep -E '^CONFIG_TARGET_qualcommax_ipq807x_DEVICE_redmi_ax6-stock=y' .config || {
-            echo "::error::目标设备 redmi_ax6-stock 未启用"; exit 1; }
+            echo "::error::目标设备 redmi_ax6-stock 未启用（补丁未生效或设备名不匹配）"; exit 1; }
+          echo "--- 内核版本 ---"
+          grep -E '^CONFIG_LINUX_6_12' .config | head -3 || true
 
-      - name: 校验 WireGuard 与 tailscale 已启用
+      - name: 校验核心功能包已启用
         run: |
+          set +e
           cd openwrt
-          COUNT=$(grep -cE '^CONFIG_PACKAGE_(kmod-wireguard|wireguard-tools|luci-proto-wireguard|rpcd-mod-wireguard)=y' .config || true)
-          grep -E '^CONFIG_PACKAGE_(kmod-wireguard|wireguard-tools|luci-proto-wireguard|rpcd-mod-wireguard)=y' .config || true
-          echo "WireGuard 命中行数: $COUNT（应为 4）"
-          if [ "$COUNT" -lt 4 ]; then
-            echo "::error::WireGuard 配置未全部启用，终止编译"
-            exit 1
-          fi
-          # tailscale 需要在 /etc/config 之外保留状态，且依赖 kmod-tun
-          TS=$(grep -cE '^CONFIG_PACKAGE_tailscale=y' .config || true)
-          TUN=$(grep -cE '^CONFIG_PACKAGE_kmod-tun=y' .config || true)
-          echo "tailscale=$TS（应为 1）  kmod-tun=$TUN（应为 1）"
-          if [ "$TS" -lt 1 ] || [ "$TUN" -lt 1 ]; then
-            echo "::error::tailscale 或 kmod-tun 未启用，终止编译"
-            exit 1
-          fi
+          FAIL=0
 
-      # dl/ 是纯输入：make download 按 PKG_SOURCE 的文件名往里放 tarball，不参与编译判定，
-      # 所以缓存它不会像 staging_dir 那样让别的包链到错的东西。
-      # 必须放在「下载依赖源码」之前恢复：这一步之后 dl/ 才被填满，保存由本 action 的 post 步负责。
-      - name: 恢复 dl 缓存
-        uses: actions/cache@v4
-        with:
-          path: /mnt/ax6build/openwrt/dl
-          # 精确 key 由仓库状态算出：ax6.config 或本文件不变就命中上一次的归档、不产生新条目；
-          # 变了也只是换一个 key，restore-keys 仍按前缀捞回旧 tarball，make download 只补缺的。
-          key: dl-${{ hashFiles('ax6.config') }}-${{ hashFiles('.github/workflows/build.yml') }}
-          restore-keys: |
-            dl-
+          check() {  # $1=符号 $2=说明
+            if grep -qE "^CONFIG_PACKAGE_$1=y" .config; then
+              echo "OK    $1  ($2)"
+            else
+              echo "::error::$1 未启用（$2）"
+              FAIL=1
+            fi
+          }
+          warn() {
+            if grep -qE "^CONFIG_PACKAGE_$1=y" .config; then
+              echo "OK    $1"
+            else
+              echo "::warning::$1 未进入最终 config（界面/功能会缺）"
+              echo "- ⚠️ $1 未启用" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          echo "===== 硬性要求 ====="
+          check kmod-wireguard "WireGuard 内核模块"
+          check wireguard-tools "wg 命令"
+          check luci-proto-wireguard "LuCI WireGuard 协议页"
+          check rpcd-mod-wireguard "rpcd UCI 接口"
+          check tailscale "tailscale"
+          check kmod-tun "tailscale 依赖 /dev/net/tun"
+          check kmod-qca-nss-drv "NSS 驱动"
+          check kmod-qca-nss-ecm "NSS ECM 连接管理"
+          check luci-base "LuCI 核心"
+
+          echo "===== 预期增强项（缺失只告警）====="
+          warn luci-ssl-openssl
+          warn kmod-nf-nathelper
+          warn kmod-nf-nathelper-extra
+          warn kmod-nf-nathelper-rtsp
+          warn kmod-nft-fullcone
+          warn luci-app-wol
+          warn luci-theme-argon
+          warn luci-app-openclash
+          warn luci-app-mosdns
+          warn luci-app-turboacc
+          warn luci-app-vlmcsd
+          warn luci-app-cpufreq
+          warn autocore
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::核心功能包缺失，终止编译"
+            exit 1
+          fi
 
       - name: 下载依赖源码
         run: |
@@ -254,16 +289,12 @@ jobs:
           echo "== 并行编译失败，串行 V=s 重试（保留首个错误现场） =="
           cp /tmp/build.log /tmp/build_parallel.log
           free -h; df -h /
-          # 串行全量重编比并行慢 3 倍以上，必须限时：一旦把 job 顶到 350 分钟超时，
-          # 下面的失败诊断、logs 分支、日志 artifact 全都不会执行，最需要日志时恰好没有。
-          timeout 45m make -j1 V=s 2>&1 | tee /tmp/build_serial.log || true
+          make -j1 V=s 2>&1 | tee /tmp/build_serial.log || true
           cp /tmp/build_serial.log /tmp/build.log
           exit 1
 
-      # 失败时把关键错误写进 job summary + annotation
-      # annotation 与 check-run summary 无需登录即可通过 API 读取，便于远程诊断
       - name: 失败诊断
-        if: failure() || cancelled()
+        if: failure()
         run: |
           LOG=/tmp/build.log
           [ -f "$LOG" ] || LOG=/tmp/build_serial.log
@@ -280,7 +311,7 @@ jobs:
             echo '```'
             echo "### 匹配到的错误行（末尾 40 条）"
             echo '```'
-            grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|make.*\*\*\*|fatal error|undefined reference|unable to select packages|breaks:|^Package .* is missing dependencies" "$LOG" 2>/dev/null | tail -40 || echo "(未匹配到关键字)"
+            grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|fatal error|undefined reference|unable to select packages|breaks:|missing dependencies" "$LOG" 2>/dev/null | tail -40 || echo "(未匹配到关键字)"
             echo '```'
             echo "### 依赖冲突区块（若有）"
             echo '```'
@@ -291,16 +322,14 @@ jobs:
             tail -120 "$LOG" 2>/dev/null
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|make.*\*\*\*|undefined reference" "$LOG" 2>/dev/null \
+          grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|undefined reference" "$LOG" 2>/dev/null \
             | tail -8 | while IFS= read -r l; do echo "::error title=build-error::$l"; done
           mkdir -p out
           tail -c 3000000 "$LOG" > out/build-tail.log 2>/dev/null || true
           echo "诊断已写入 job summary"
 
-      # 把失败日志摘要推到 logs 分支：仓库是公开的，raw 链接无需登录即可读取，
-      # 省去「下载 artifact / 截图日志」这一环。
       - name: 发布失败日志到 logs 分支
-        if: failure() || cancelled()
+        if: failure()
         run: |
           set +e
           LOG=/tmp/build.log
@@ -319,7 +348,7 @@ jobs:
             grep -n -B1 -A12 "breaks:" "$LOG" | head -120
             echo
             echo "########## 错误行（末尾 80） ##########"
-            grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|make.*\*\*\*|undefined reference|^Package .* is missing dependencies|Conflicting|WARNING: Makefile" "$LOG" | tail -80
+            grep -nE "error:|Error [0-9]|No space left|Killed|make.*\*\*\*|undefined reference|missing dependencies|Conflicting|WARNING: Makefile" "$LOG" | tail -80
             echo
             echo "########## 日志末尾 800 行 ##########"
             tail -800 "$LOG"
@@ -337,7 +366,7 @@ jobs:
             echo "已发布到 logs 分支" || echo "发布失败（不影响主流程）"
 
       - name: 上传编译日志（仅失败时）
-        if: failure() || cancelled()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
@@ -356,10 +385,6 @@ jobs:
           echo "--- 产物清单 ---"
           ls -lh out/
           sha256sum out/* || true
-          # 量体积：给缓存策略留真实数据（只加打印，不新增步骤）
-          echo "--- 缓存与下载体积 ---"
-          du -sh openwrt/.ccache openwrt/dl 2>/dev/null || true
-          echo "dl 文件数: $(ls openwrt/dl 2>/dev/null | wc -l)"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4

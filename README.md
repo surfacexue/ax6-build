@@ -1,52 +1,53 @@
-# AX6 NSS 固件（启用 WireGuard）云编译
+# AX6 NSS 固件云编译（qosmio 25.12-nss）
 
-用 GitHub Actions 编译 Redmi AX6（`redmi_ax6-stock`，单 UBI 大分区）的 NSS 固件，
-源码来自 [TerryLip/AX6NSS-qosmio](https://github.com/TerryLip/AX6NSS-qosmio)，
-`ax6.config` 取自作者的 `AX6.config`，**只改了 4 行**：把 WireGuard 相关包从关闭改为启用。
+用 GitHub Actions 编译 **Redmi AX6 原厂分区（`redmi_ax6-stock`）** 的 NSS 固件。
 
-## 相对上游的改动
+- 源码：[`qosmio/openwrt-ipq`](https://github.com/qosmio/openwrt-ipq) 的 **`25.12-nss`** 分支
+- 内核：**6.12.91**
+- 无线：mac80211 backports **6.18.26**（ath11k）
+- NSS：[`qosmio/nss-packages`](https://github.com/qosmio/nss-packages) `NSS-12.5-K6.x`
 
-```diff
--# CONFIG_PACKAGE_kmod-wireguard is not set
-+CONFIG_PACKAGE_kmod-wireguard=y
--# CONFIG_PACKAGE_wireguard-tools is not set
-+CONFIG_PACKAGE_wireguard-tools=y
--# CONFIG_PACKAGE_luci-proto-wireguard is not set
-+CONFIG_PACKAGE_luci-proto-wireguard=y
--# CONFIG_PACKAGE_rpcd-mod-wireguard is not set
-+CONFIG_PACKAGE_rpcd-mod-wireguard=y
-```
+## 相对上游的四处改动
 
-其余 8000+ 行与作者 `AX6.config` 逐字节一致，NSS / ECM 硬件加速、目标设备均未改动。
+| # | 改动 | 位置 |
+|---|---|---|
+| 1 | 新增 `Device/redmi_ax6-stock`（上游只有扩容布局 `redmi_ax6`） | `patches/0001-add-redmi-ax6-stock.patch` |
+| 2 | 并入 `package/new` + `package/emortal`（argon/openclash/mosdns/turboacc/vlmcsd/cpufreq/autocore/coremark/default-settings）；mosdns 的 LuCI 界面另从 `sbwml/luci-app-mosdns` 取 | workflow 第 8 步，运行时拉取 |
+| 3 | `luci` feed 指向 immortalwrt 的 `openwrt-25.12`（官方 LuCI 没有 argon 主题） | workflow 第 7 步 |
+| 4 | `ax6.config` 启用 WireGuard 四包、tailscale、`luci-ssl-openssl`、`kmod-nf-nathelper` 两件套 | `ax6.config` |
+
+`packages` / `routing` / `telephony` / `video` 保持 openwrt-25.12 原样。**不再需要替换 golang**：
+openwrt-25.12 的 packages feed 自带 `golang1.27`，满足 tailscale 1.104.1 的 `go 1.27.3` 要求。
 
 ## 怎么用
 
-1. 仓库 **Actions** 页 → 左侧 **Build AX6 NSS Firmware** → 右侧 **Run workflow** → 再点绿色按钮
-2. 等待编译（公共仓库 4 核 runner，预计 2–4 小时，上限 6 小时）
-3. 完成后在本页 **Artifacts** 下载 `ax6-nss-wireguard-firmware`
-4. 解压得到 `*sysupgrade.bin` 与 `sha256sums`
+1. 仓库 **Actions** → **Build AX6 NSS Firmware** → **Run workflow**
+2. 等待编译（4 核 runner，冷启动约 80–100 分钟；ccache 命中后约 60–70 分钟）
+3. **Artifacts** 下载 `ax6-nss-wireguard-firmware`
+4. 解压得 `*sysupgrade.bin`、`*.manifest`、`sha256sums`、`config.buildinfo`
 
 ## 文件说明
 
 | 文件 | 用途 |
 |---|---|
-| `ax6.config` | 编译配置（作者 `AX6.config` + 4 行 WireGuard） |
-| `.github/workflows/build.yml` | 云编译流程 |
+| `ax6.config` | 完整编译配置（371 个 `CONFIG_PACKAGE_*=y`） |
+| `.github/workflows/build.yml` | 云编译流程（18 步） |
+| `patches/0001-add-redmi-ax6-stock.patch` | 唯一的源码改动：原厂分区设备定义 |
 
-编译流程跟随作者 README 的“本地编译详细步骤”，但有两处**必须偏离**（2026-11-22 实测修正）：
+## 两个已修的坑（写进 workflow 里，不用再管）
 
-- `luci-base`、`luci-mod-status` ← 用 `git clone --sparse` + `git sparse-checkout`
-  从 `immortalwrt/luci` 的 `master` 分支取。**原 README 的 `svn export` 已失效**：
-  GitHub 2024 年停止 Subversion 支持，`https://github.com/immortalwrt/luci/trunk` 返回 404
-- `golang` ← 换成 `sbwml/packages_lang_golang` 的 `23.x` 分支（`git clone`，这一步原本就正常）
+1. **`luci-ssl-openssl` 的死依赖**
+   immortalwrt 的 LuCI 还写着 `+px5g-openssl`，而 openwrt-25.12 已把 px5g 拆成
+   `px5g-mbedtls` / `px5g-wolfssl`，`px5g-openssl` 在官方树、immortalwrt packages、
+   qosmio nss-packages 里**全都不存在**。workflow 里按官方 25.12 的写法改回 `+openssl-util`。
 
-删包方面只删 `coremark`（未被配置启用，删除无害）。**`v2ray-geodata` 不删**：
-`ax6.config` 里 `CONFIG_PACKAGE_v2ray-geoip=y`、`v2ray-geosite=y` 正是该包提供，
-且 openclash 依赖它们，删掉会断依赖链导致 `depends on v2ray-geoip which is not available`。
-
-因采用“原位替换”，`package/feeds/` 下的软链保持有效，**不要**再重跑
-`./scripts/feeds install -a`（会因 coremark 已删而报缺包）。
+2. **`luci.mk` 的 ucode 字节码约束**
+   只有 openwrt 官方 LuCI 的 master 分支才有 `LUCI_UT_MIN_UCODE`，会把模板编成字节码；
+   immortalwrt 的 `openwrt-25.12` 分支没有。workflow 里有硬校验，命中就中止而不是带病往下跑。
 
 ## 注意
 
-`make menuconfig` 在 CI 里无法交互，已用等价的 `make defconfig` 代替。
+- `make menuconfig` 在 CI 里无法交互，用 `make defconfig` 代替。
+- 产物名是 `openwrt-qualcommax-ipq807x-redmi_ax6-stock-squashfs-sysupgrade.bin`，
+  **必须含 `-stock`**，这是原厂分区；不带 `-stock` 的是扩容布局，刷了会 brick。
+- 详细背景、风险清单、验收步骤见 `交接文档/qosmio-25.12-nss-移植说明.md`。
