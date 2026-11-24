@@ -156,6 +156,15 @@ jobs:
           echo "--- 并入的目录 ---"
           ls package/new package/emortal
 
+          # 1a) vlmcsd 的 PKG_MIRROR_HASH 写死的是 2020 年那份 tarball 的 sha256。
+          #     它带 debian/docker 两个 submodule，dl_github_archive.py 不支持 submodule，
+          #     fallback 用 git clone+archive 重新打包，内容必然与当年不同 →
+          #     download.pl 校验 hash 不过就删档重试，最终 Error 1（run #12 即死于此）。
+          #     源码版本仍钉死在 e599080，submodule 只是打包辅助目录、不参与产物，
+          #     所以把镜像校验改成 skip（该值是 OpenWrt 下载脚本支持的）。
+          sed -i 's|^PKG_MIRROR_HASH:=.*|PKG_MIRROR_HASH:=skip|' package/new/vlmcsd/Makefile
+          grep -E '^PKG_(SOURCE_VERSION|MIRROR_HASH)' package/new/vlmcsd/Makefile
+
           # 1b) mosdns 的 LuCI 界面不在这两者里，它由第三方 sbwml 维护
           #     （immortalwrt 的 luci 与 packages 都只带 mosdns 本体，没有界面）。
           #     只取 luci-app-mosdns 与它依赖的 geo2txt，mosdns 本体仍用 feed 的版本。
