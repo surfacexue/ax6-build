@@ -1,8 +1,78 @@
+diff --git a/package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq807x b/package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq807x
+index 46a7111..5689ebd 100644
+--- a/package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq807x
++++ b/package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq807x
+@@ -50,6 +50,7 @@ prpl,haze)
+ 	ubootenv_add_mmc "0:APPSBLENV" "" "0x0" "0x40000" "0x400" "0x100"
+ 	;;
+ redmi,ax6|\
++redmi,ax6-stock|\
+ xiaomi,ax3600|\
+ xiaomi,ax9000)
+ 	ubootenv_add_mtd "0:appsblenv" "0x0" "0x10000" "0x20000"
+diff --git a/target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq8071-ax6-stock.dts b/target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq8071-ax6-stock.dts
+new file mode 100644
+index 0000000..47e05a1
+--- /dev/null
++++ b/target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq8071-ax6-stock.dts
+@@ -0,0 +1,52 @@
++// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
++
++#include "ipq8071-ax6.dts"
++
++/ {
++	model = "Redmi AX6 (stock layout)";
++	compatible = "redmi,ax6-stock", "qcom,ipq8074";
++
++	aliases {
++		/* Aliases as required by u-boot to patch MAC addresses */
++		ethernet1 = &dp2;
++		ethernet2 = &dp3;
++		ethernet3 = &dp4;
++		ethernet4 = &dp5;
++	};
++
++	chosen {
++		bootargs-append = " root=/dev/ubiblock0_1";
++	};
++};
++
++&qpic_nand {
++	/delete-node/ partitions;
++
++	nand@0 {
++		/delete-node/ partitions;
++
++		partitions {
++			compatible = "qcom,smem-part";
++		};
++	};
++};
++
++&dp2 {
++	/delete-property/ nvmem-cells;
++	/delete-property/ nvmem-cell-names;
++};
++
++&dp3 {
++	/delete-property/ nvmem-cells;
++	/delete-property/ nvmem-cell-names;
++};
++
++&dp4 {
++	/delete-property/ nvmem-cells;
++	/delete-property/ nvmem-cell-names;
++};
++
++&dp5 {
++	/delete-property/ nvmem-cells;
++	/delete-property/ nvmem-cell-names;
++};
 diff --git a/target/linux/qualcommax/image/ipq807x.mk b/target/linux/qualcommax/image/ipq807x.mk
-index 75af3d0..a84c6ea 100644
+index 75af3d0..a4f747b 100644
 --- a/target/linux/qualcommax/image/ipq807x.mk
 +++ b/target/linux/qualcommax/image/ipq807x.mk
-@@ -387,12 +387,26 @@ TARGET_DEVICES += qnap_301w
+@@ -387,12 +387,28 @@ TARGET_DEVICES += qnap_301w
  
  define Device/redmi_ax6
  	$(call Device/xiaomi_ax3600)
@@ -14,14 +84,16 @@ index 75af3d0..a84c6ea 100644
  endef
  TARGET_DEVICES += redmi_ax6
  
-+# 原厂（stock）分区布局：没有独立的 kernel 分区，ARTIFACTS 置空。
-+# 这是本仓库唯一需要相对上游修改的设备定义，见 patches/0001-add-redmi-ax6-stock.patch
++# 原厂（stock）分区布局：单卷 UBI，kernel 与 rootfs 各占一个卷，没有独立 kernel 分区。
++# DEVICE_DTS 必须显式写：image/Makefile 默认把设备名按 _ 切开取最后一段，
++# redmi_ax6-stock 会推导出 ipq8071-ax6-stock，而树里只有 ipq8071-ax6.dts。
 +define Device/redmi_ax6-stock
 +	$(call Device/redmi_ax6)
 +	DEVICE_VARIANT := (stock layout)
 +	DEVICE_ALT0_VENDOR := Redmi
 +	DEVICE_ALT0_MODEL := AX6
 +	DEVICE_ALT0_VARIANT := (custom U-Boot layout)
++	DEVICE_DTS := ipq8071-ax6-stock
 +	KERNEL_SIZE :=
 +	ARTIFACTS :=
 +endef
@@ -30,3 +102,83 @@ index 75af3d0..a84c6ea 100644
  define Device/spectrum_sax1v1k
  	$(call Device/FitImage)
  	$(call Device/EmmcImage)
+diff --git a/target/linux/qualcommax/ipq807x/base-files/etc/board.d/01_leds b/target/linux/qualcommax/ipq807x/base-files/etc/board.d/01_leds
+index ae94165..2636966 100644
+--- a/target/linux/qualcommax/ipq807x/base-files/etc/board.d/01_leds
++++ b/target/linux/qualcommax/ipq807x/base-files/etc/board.d/01_leds
+@@ -39,7 +39,8 @@ netgear,wax630)
+ 	ucidef_set_led_netdev "lan1" "LAN1" "lan1:green" "lan1"
+ 	ucidef_set_led_netdev "lan2" "LAN2" "lan2:green" "lan2"
+ 	;;
+-redmi,ax6)
++redmi,ax6|\
++redmi,ax6-stock)
+ 	ucidef_set_led_netdev "wan" "WAN" "blue:network" "wan"
+ 	;;
+ xiaomi,ax3600)
+diff --git a/target/linux/qualcommax/ipq807x/base-files/etc/board.d/02_network b/target/linux/qualcommax/ipq807x/base-files/etc/board.d/02_network
+index 3c0e123..17c5b9e 100644
+--- a/target/linux/qualcommax/ipq807x/base-files/etc/board.d/02_network
++++ b/target/linux/qualcommax/ipq807x/base-files/etc/board.d/02_network
+@@ -40,6 +40,7 @@ ipq807x_setup_interfaces()
+ 	linksys,mx4300|\
+ 	prpl,haze|\
+ 	redmi,ax6|\
++	redmi,ax6-stock|\
+ 	spectrum,sax1v1k|\
+ 	xiaomi,ax3600)
+ 		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "wan"
+diff --git a/target/linux/qualcommax/ipq807x/base-files/etc/hotplug.d/firmware/11-ath11k-caldata b/target/linux/qualcommax/ipq807x/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
+index df4907c..78255ff 100644
+--- a/target/linux/qualcommax/ipq807x/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
++++ b/target/linux/qualcommax/ipq807x/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
+@@ -31,6 +31,7 @@ case "$FIRMWARE" in
+ 	netgear,wax218|\
+ 	qnap,301w|\
+ 	redmi,ax6|\
++	redmi,ax6-stock|\
+ 	xiaomi,ax3600|\
+ 	xiaomi,ax9000|\
+ 	yuncore,ax880|\
+diff --git a/target/linux/qualcommax/ipq807x/base-files/etc/init.d/bootcount b/target/linux/qualcommax/ipq807x/base-files/etc/init.d/bootcount
+index e7c2049..b808ca3 100644
+--- a/target/linux/qualcommax/ipq807x/base-files/etc/init.d/bootcount
++++ b/target/linux/qualcommax/ipq807x/base-files/etc/init.d/bootcount
+@@ -21,5 +21,10 @@ boot() {
+ 	netgear,wax630)
+ 		fw_setenv boot_count 0
+ 	;;
++	redmi,ax6-stock)
++		# 单槽：U-Boot 没有 flag_boot_rootfs，这里只清 OTA 标志
++		fw_setenv flag_ota_reboot 0
++		fw_setenv flag_boot_success 1
++	;;
+ 	esac
+ }
+diff --git a/target/linux/qualcommax/ipq807x/base-files/lib/upgrade/platform.sh b/target/linux/qualcommax/ipq807x/base-files/lib/upgrade/platform.sh
+index 1ddc73f..1270fc9 100644
+--- a/target/linux/qualcommax/ipq807x/base-files/lib/upgrade/platform.sh
++++ b/target/linux/qualcommax/ipq807x/base-files/lib/upgrade/platform.sh
+@@ -257,6 +257,22 @@ platform_do_upgrade() {
+ 		CI_ROOT_UBIPART="rootfs"
+ 		nand_do_upgrade "$1"
+ 		;;
++	redmi,ax6-stock)
++		# 单槽 UBI：只有 ubi_kernel + rootfs 两个卷，不做 A/B 切换。
++		# 本机 U-Boot 只认 flag_ota_reboot / flag_boot_success，没有 flag_boot_rootfs，
++		# 所以读到空值一律按 0 处理（写 rootfs 卷），不能 fail-closed。
++		part_num="$(fw_printenv -n flag_boot_rootfs 2>/dev/null || true)"
++		[ -z "$part_num" ] && part_num=0
++		if [ "$part_num" = "1" ]; then
++			CI_UBIPART="rootfs_1"
++		else
++			CI_UBIPART="rootfs"
++		fi
++		fw_setenv flag_boot_rootfs "$part_num"
++		fw_setenv flag_last_success "$part_num"
++		fw_setenv flag_boot_success 0
++		nand_do_upgrade "$1"
++		;;
+ 	spectrum,sax1v1k)
+ 		CI_KERNPART="0:HLOS"
+ 		CI_ROOTPART="rootfs"

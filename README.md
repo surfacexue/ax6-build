@@ -11,7 +11,7 @@
 
 | # | 改动 | 位置 |
 |---|---|---|
-| 1 | 新增 `Device/redmi_ax6-stock`（上游只有扩容布局 `redmi_ax6`） | `patches/0001-add-redmi-ax6-stock.patch` |
+| 1 | 新增 `Device/redmi_ax6-stock` + `ipq8071-ax6-stock.dts`（上游只有扩容布局 `redmi_ax6`），并把 `redmi,ax6-stock` 加进网络/LED/校准/ubootenv/bootcount/platform.sh 的分支 | `patches/0001-add-redmi-ax6-stock.patch` |
 | 2 | 并入 `package/new` + `package/emortal`（argon/openclash/mosdns/turboacc/vlmcsd/cpufreq/autocore/coremark/default-settings）；mosdns 的 LuCI 界面另从 `sbwml/luci-app-mosdns` 取 | workflow 第 8 步，运行时拉取 |
 | 3 | `luci` feed 指向 immortalwrt 的 `openwrt-25.12`（官方 LuCI 没有 argon 主题） | workflow 第 7 步 |
 | 4 | `ax6.config` 启用 WireGuard 四包、tailscale、`luci-ssl-openssl`、`kmod-nf-nathelper` 两件套 | `ax6.config` |
@@ -32,7 +32,7 @@ openwrt-25.12 的 packages feed 自带 `golang1.27`，满足 tailscale 1.104.1 �
 |---|---|
 | `ax6.config` | 完整编译配置（371 个 `CONFIG_PACKAGE_*=y`） |
 | `.github/workflows/build.yml` | 云编译流程（18 步） |
-| `patches/0001-add-redmi-ax6-stock.patch` | 唯一的源码改动：原厂分区设备定义 |
+| `patches/0001-add-redmi-ax6-stock.patch` | 唯一的源码改动：原厂分区设备定义 + stock DTS + 板级分支 |
 
 ## 两个已修的坑（写进 workflow 里，不用再管）
 

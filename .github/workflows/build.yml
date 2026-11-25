@@ -176,12 +176,21 @@ jobs:
           sed -n 's/^PKG_VERSION:=//p' package/luci-app-mosdns/Makefile
           grep -E '^LUCI_DEPENDS' package/luci-app-mosdns/Makefile
 
-          # 2) 设备定义：补 redmi_ax6-stock（原厂分区布局）
+          # 2) 设备定义 + stock DTS + 板级分支（网络/LED/校准/ubootenv/bootcount/platform.sh）
           PATCH="$GITHUB_WORKSPACE/patches/0001-add-redmi-ax6-stock.patch"
           git apply --check -v "$PATCH"
           git apply "$PATCH"
           echo "--- 补丁结果 ---"
-          grep -A9 'define Device/redmi_ax6-stock' target/linux/qualcommax/image/ipq807x.mk
+          grep -A10 'define Device/redmi_ax6-stock' target/linux/qualcommax/image/ipq807x.mk
+          # 设备名 redmi_ax6-stock 会被推导成 ipq8071-ax6-stock.dtb，缺了这个文件
+          # 就是在编了 4 小时之后才炸（run #14：cc1: No such file or directory）
+          DTS=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq8071-ax6-stock.dts
+          test -s "$DTS" || { echo "::error::缺 $DTS，镜像阶段必炸"; exit 1; }
+          grep -q 'compatible = "redmi,ax6-stock"' "$DTS" || {
+            echo "::error::$DTS 的 compatible 不是 redmi,ax6-stock"; exit 1; }
+          grep -q 'compatible = "qcom,smem-part"' "$DTS" || {
+            echo "::error::$DTS 没用 smem-part，分区表会按扩容布局走"; exit 1; }
+          echo "OK  $DTS 就位（compatible + smem-part 均已核对）"
 
       - name: 校验工具链与 LuCI 来源
         run: |
