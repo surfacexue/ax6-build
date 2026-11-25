@@ -71,18 +71,20 @@ part_num="$(fw_printenv -n flag_boot_rootfs 2>/dev/null || true)"
 
 ### 3. NSS 固件 11.4.0.5-R6 → 12.5-R210
 
-`nss-firmware` 包（2025.05.01）里内置四套固件，靠 Kconfig 选：
+`nss-firmware` 包（`PKG_VERSION:=2025.05.01`，来自 `JuliusBairaktaris/nss-packages@ppe-nss`）
+里提供两档固件，靠 Kconfig 二选一：
 
 | 开关 | 版本 | 备注 |
 |---|---|---|
-| `NSS_FIRMWARE_VERSION_11_4` | 11.4.0.5 Release **6** | 默认值，**唯一支持 802.11s mesh** |
-| `NSS_FIRMWARE_VERSION_12_1` | 12.1 Release 003 | 不支持 mesh |
-| `NSS_FIRMWARE_VERSION_12_2` | 12.2 Release 161 | 不支持 mesh |
-| `NSS_FIRMWARE_VERSION_12_5` | 12.5 Release **210** | 不支持 mesh，IPQ807x 最后一个公开版 |
+| `NSS_FIRMWARE_VERSION_12_5` | 12.5 Release **210** | 当前默认值；不支持 802.11s mesh |
+| `NSS_FIRMWARE_VERSION_11_4` | 11.4.0.5 Release **6** | **唯一支持 802.11s mesh** 的一档 |
 
-**驱动会跟着切**：`qca-nss-drv` 的 Makefile 里只有 `ifeq ($(CONFIG_NSS_FIRMWARE_VERSION_11_4),y)`
-才降级到 2021-09-13 的 `11.4.0.5` 源码，否则默认用 2024-11-13 的 `QSDK 12.5`。所以一个开关同时
-换固件和驱动，不需要两处改。
+（2026-11-25 复核：上游这一版只剩这两档，早期曾出现过的 12.1 / 12.2 两条线已不在 Kconfig 里。）
+
+**驱动会跟着切（仅 ECM 线适用）**：ECM 路线（主线 / LibWrt）的 `qca-nss-drv` Makefile 里只有
+`ifeq ($(CONFIG_NSS_FIRMWARE_VERSION_11_4),y)` 才降级到 2021-09-13 的 `11.4.0.5` 源码，否则默认用
+2024-11-13 的 `QSDK 12.5`。**本线是 PPE 架构，树里没有 `qca-nss-drv`**，`nss-firmware` 在这里
+只提供固件 blob，驱动是树内 `package/kernel/nss-wifi-drv`。
 
 主线（`ax6.config` 2183 行）和 LibWrt 线都显式写了 `CONFIG_NSS_FIRMWARE_VERSION_11_4=y`，
 所以**一直用的是 2021 年的 11.4**，dmesg 里 `NSS FW Version: NSS.HK.11.4.0.5-6-R` 就是证据。
