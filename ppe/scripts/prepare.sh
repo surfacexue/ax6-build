@@ -14,8 +14,8 @@ set -Eeuo pipefail
 [[ -f "$TINY_REPO/scripts/prepare-ppe-experiment.sh" ]] || {
   echo "ERROR: 缺少 $TINY_REPO/scripts/prepare-ppe-experiment.sh" >&2; exit 1; }
 
-# fullconenat-nft 的来源钉死到 commit，避免上游分支漂移导致内容变化
-IMM_SRC_SHA="${IMM_SRC_SHA:-b1088b5661bf257b3e89f8537df906a67b8e7289}"
+# fullconenat-nft 的来源由 ppe/pkgs/ 自己钉住（commit 与补丁都在仓库里），
+# 这里只保留 ImmortalWrt luci 的版本变量给 argon / openclash 用
 IMM_BRANCH="${IMM_BRANCH:-openwrt-25.12}"
 
 echo '===== 1/6 stock 布局移植（复用上游 guarded 脚本）====='
@@ -61,28 +61,55 @@ grep -q 'luci-compat' package/ax6-luci/luci-app-openclash/Makefile || {
   echo 'ERROR: luci-app-openclash 依赖声明与预期不符，需人工复核' >&2; exit 1; }
 echo 'OK: luci-app-openclash 已并入 package/ax6-luci（内核 clash/mihomo 需在设备上另行上传）'
 
-echo '===== 4/6 取 fullconenat-nft（kmod-nft-fullcone，含 6.12+ 内核补丁）====='
-# 该包在任何 openwrt feed 里都没有，只有 ImmortalWrt 树内维护；目录里只有
-# Makefile + patches/，直接按 commit 拉两个文件即可，不必 clone 整棵树。
+echo '===== 4/6 FullCone 全家桶（内核模块 + 用户态三件套 + LuCI 页）====='
+# 只有内核模块是没用的：官方 nftables/libnftnl 不认 fullcone 表达式，firewall4 也没有
+# 对应开关，规则根本写不进去。所以这一整套都随仓库走 ppe/pkgs/ 下，版本按本树核对过：
+#   nftables 1.1.7 · libnftnl 1.3.2 · firewall4 e6f600c4
+pkg_src="../ppe/pkgs"
+[[ -d "$pkg_src" ]] || { echo "ERROR: 缺少 $pkg_src（ppe/pkgs 没随仓库带上来）" >&2; exit 1; }
+
 fcn_dir="package/ax6-pkgs/fullconenat-nft"
-fcn_url="https://raw.githubusercontent.com/immortalwrt/immortalwrt/${IMM_SRC_SHA}/package/network/utils/fullconenat-nft"
-mkdir -p "$fcn_dir/patches"
-fetch() {
-  curl -fsSL --retry 3 --retry-delay 2 --max-time 60 "$1" -o "$2" || {
-    echo "ERROR: 下载失败 $1" >&2; exit 1; }
-}
-fetch "$fcn_url/Makefile" "$fcn_dir/Makefile"
-fetch "$fcn_url/patches/010-fix-build-with-kernel-6.12.patch" \
-      "$fcn_dir/patches/010-fix-build-with-kernel-6.12.patch"
+mkdir -p package/ax6-pkgs
+cp -a "$pkg_src/fullconenat-nft" "$fcn_dir"
 grep -q 'KernelPackage/nft-fullcone' "$fcn_dir/Makefile" || {
   echo 'ERROR: fullconenat-nft/Makefile 不是预期的 kmod 包定义' >&2; exit 1; }
-grep -q 'PKG_SOURCE_VERSION:=07d93b6' "$fcn_dir/Makefile" || {
-  echo 'ERROR: fullconenat-nft 上游版本已变，需人工复核兼容性' >&2; exit 1; }
-# 源码走 git clone 且上游仓库带 submodule/重打包，镜像哈希必对不上，直接跳过校验
-sed -i 's|^PKG_MIRROR_HASH:=.*|PKG_MIRROR_HASH:=skip|' "$fcn_dir/Makefile"
+grep -qx 'PKG_SOURCE_VERSION:=07d93b626ce5ea885cd16f9ab07fac3213c355d9' \
+     "$fcn_dir/Makefile" || {
+  echo 'ERROR: fullconenat-nft 源码版本与预期不符，需人工复核' >&2; exit 1; }
 grep -qx 'PKG_MIRROR_HASH:=skip' "$fcn_dir/Makefile" || {
-  echo 'ERROR: PKG_MIRROR_HASH 未能改为 skip' >&2; exit 1; }
-echo "OK: $(wc -l < "$fcn_dir/Makefile") 行 Makefile + 1 个 6.12+ 补丁已就位（$IMM_SRC_SHA）"
+  echo 'ERROR: PKG_MIRROR_HASH 不是 skip，git 源码校验会失败' >&2; exit 1; }
+echo "OK: kmod-nft-fullcone 包定义 + $(ls "$fcn_dir/patches" | wc -l) 个内核补丁"
+
+cp -a "$pkg_src/luci-app-fullcone" package/ax6-luci/
+[[ -f package/ax6-luci/luci-app-fullcone/Makefile ]] || {
+  echo 'ERROR: luci-app-fullcone 缺失' >&2; exit 1; }
+echo 'OK: luci-app-fullcone 已并入 package/ax6-luci'
+
+# 用户态三件套：补丁打进树内包，再按需要改两处 Makefile
+#   libnftnl  加新源文件 src/expr/fullcone.c，票内自带的 Makefile.in 是旧的，必须 autoreconf
+#   firewall4 要声明对内核模块的依赖，否则装了 fw4 没装 kmod 时 fw4 一 reload 就报错
+install_patch() {
+  local pkgdir="$1" patch="$2"
+  [[ -d "$pkgdir" ]] || { echo "ERROR: 树里找不到 $pkgdir（上游可能挪了位置）" >&2; exit 1; }
+  [[ -f "$patch" ]] || { echo "ERROR: 缺少补丁 $patch" >&2; exit 1; }
+  mkdir -p "$pkgdir/patches"
+  cp "$patch" "$pkgdir/patches/900-fullcone.patch"
+}
+install_patch package/libs/libnftnl                      "$pkg_src/libnftnl/fullcone.patch"
+install_patch package/network/utils/nftables             "$pkg_src/nftables/fullcone.patch"
+install_patch package/network/config/firewall4           "$pkg_src/firewall4/fullcone.patch"
+
+grep -q '^PKG_FIXUP:=autoreconf' package/libs/libnftnl/Makefile \
+  || sed -i '/^PKG_RELEASE:=/a PKG_FIXUP:=autoreconf' package/libs/libnftnl/Makefile
+grep -q '^PKG_FIXUP:=autoreconf' package/libs/libnftnl/Makefile || {
+  echo 'ERROR: libnftnl 未能加上 PKG_FIXUP:=autoreconf' >&2; exit 1; }
+
+grep -q 'kmod-nft-fullcone' package/network/config/firewall4/Makefile \
+  || sed -i 's/+kmod-nft-nat /+kmod-nft-nat +kmod-nft-fullcone /' \
+           package/network/config/firewall4/Makefile
+grep -q 'kmod-nft-fullcone' package/network/config/firewall4/Makefile || {
+  echo 'ERROR: firewall4 未能加上 kmod-nft-fullcone 依赖' >&2; exit 1; }
+echo 'OK: libnftnl/nftables/firewall4 补丁就位，autoreconf 与依赖已改'
 
 echo '===== 5/6 单槽容错修补（关键，否则本机 sysupgrade 直接拒绝）====='
 python3 - <<'PY'
@@ -124,5 +151,5 @@ for feed in feeds/luci feeds/packages feeds/nss; do
   [[ -d "$feed" ]] && echo "$feed $(git -C "$feed" rev-parse HEAD)"
 done
 echo "immortalwrt/luci $(cat ./LUCI-SHA.txt)"
-echo "fullconenat-nft 来自 immortalwrt@${IMM_SRC_SHA}:package/network/utils/fullconenat-nft"
+echo 'fullconenat-nft 来自本仓库 ppe/pkgs/（源码 07d93b6 + ImmortalWrt 的两份补丁）'
 echo '源准备完成。注意：编译成功不等于可刷，见 ppe/README.md 的验收清单。'

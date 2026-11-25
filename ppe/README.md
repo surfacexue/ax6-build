@@ -98,29 +98,41 @@ part_num="$(fw_printenv -n flag_boot_rootfs 2>/dev/null || true)"
 | 代理 | `luci-app-openclash` | **ImmortalWrt `luci@openwrt-25.12`**（openwrt 官方 luci 没有） | 只有界面，clash/mihomo 内核不随包发布 |
 | | `luci-compat` `dnsmasq-full` `ruby` `ruby-yaml` `bash` `unzip` `ip-full` `kmod-nft-tproxy` `kmod-inet-diag` | openwrt luci / packages / 内核 | openclash 的硬依赖，缺一个 defconfig 就会静默把 openclash 丢掉 |
 | UPnP | `luci-app-upnp` + `miniupnpd-nftables` | openwrt luci / packages | 游戏主机自动端口映射；nftables 变体，和 fw4 同栈 |
-| FullCone | `kmod-nft-fullcone` | **ImmortalWrt 树内 `package/network/utils/fullconenat-nft`**（任何 feed 都没有） | 源码 `fullcone-nat-nftables/nft-fullcone` @`07d93b6`，带 6.12+ 内核补丁 |
+| FullCone | `kmod-nft-fullcone` + `luci-app-fullcone` | **本仓库 `ppe/pkgs/`**（任何 feed 都没有） | 内核模块源码 `fullcone-nat-nftables/nft-fullcone` @`07d93b6` + ImmortalWrt 两份补丁；用户态另有 nftables / libnftnl / firewall4 三个补丁 |
 | 广告过滤 | `luci-app-adblock-fast` + `adblock-fast` | openwrt luci / packages | 走 dnsmasq-full，配 openclash 时可二者择一 |
 
 没有装 `mosdns` / `v2ray-geodata`：那是分流 DNS 用的，多占约 20 MiB，本机走 PC 端代理用不上。
 
-### 刷完后要手动做的三件事
+### FullCone 为什么是一整套，不是单个 kmod
+
+官方 nftables 与 libnftnl 不认 `fullcone` 表达式，firewall4 也没有对应开关。
+只装 `kmod-nft-fullcone` 的话，规则根本写不进去——`nft` 会报 unknown expression。
+所以 `ppe/pkgs/` 里放了四件套，版本按本树核对过：
+
+| 包 | 本树版本 | 补丁来源 |
+|---|---|---|
+| `libnftnl` | 1.3.2 | ImmortalWrt master（新增 `src/expr/fullcone.c`，需 `PKG_FIXUP:=autoreconf`） |
+| `nftables` | 1.1.7 | ImmortalWrt master（语法、线性化、反线性化） |
+| `firewall4` | `e6f600c4`（2026-10-29） | ImmortalWrt，按本树 commit 重生成；另给包加上 `+kmod-nft-fullcone` 依赖 |
+| `fullconenat-nft` | 源码 `07d93b6` | ImmortalWrt master：`010`（6.12+ 签名）+ `011`（端口范围与 flags 修复） |
+
+刷完后在 LuCI「网络 → FullCone NAT」里开关，或 `uci set firewall.@defaults[0].fullcone='1'`。
+只对 UDP 生效（TCP 等价于 MASQUERADE）。
+
+### 刷完后要手动做的两件事
 
 1. **OpenClash 内核**：界面里「配置文件 → 版本更新」下载 mihomo 内核，或本地文件上传。
    LuCI 装好但没内核时，OpenClash 起不来是正常现象。
-2. **FullCone 规则**：模块装上只是有了 nft 表达式，规则要自己加（fw4 的 `srcnat_wan` 链）：
-   ```sh
-   nft insert rule inet fw4 srcnat_wan meta nfproto ipv4 fullcone counter comment "FullCone NAT"
-   ```
-   只对 UDP 生效（TCP 等价于 MASQUERADE）。验证：`nft list chain inet fw4 srcnat_wan`。
-3. **UPnP**：服务默认可能未启用，LuCI「服务 → UPnP」里勾「启用」并指定内网接口。
+2. **UPnP**：服务默认可能未启用，LuCI「服务 → UPnP」里勾「启用」并指定内网接口。
 
 ### FullCone 的编译风险已做自动化兜底
 
-`fullconenat-nft` 是 2023 年代码，只有 6.12+ 的签名补丁，对 6.18 的兼容性无法离线判定。
-workflow 在正式编译前先单独预编这个模块：
+内核模块是 2023 年代码（上游仓库已 archived），用户态三个补丁也只是版本核对过、没在
+6.18 上编过。workflow 在正式编译前先单独编 FullCone 四件套：
 
-- 编过 → 继续，产物里 `UNVERIFIED.txt` 标 `FullCone: 含 kmod-nft-fullcone`；
-- 报的是 `nft_ext_fullcone.c:<行>: error` → 自动从 `.config` 剔除该项再整体编译，
+- 编过 → 继续，产物里 `UNVERIFIED.txt` 标 `FullCone: 含 …`；
+- 报的是 `nft_ext_fullcone.c` / `nf_nat_fullcone.c` 的编译错误，或补丁打不上
+  （`Hunk #N FAILED` / `patch does not apply`）→ 自动从 `.config` 剔除 FullCone 再整体编译，
   其余功能照常出固件，`UNVERIFIED.txt` 标 `FullCone: 已剔除`。
 
 这样最坏情况不会白跑 90 分钟。

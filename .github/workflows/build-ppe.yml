@@ -152,7 +152,9 @@ jobs:
           check kmod-inet-diag        "openclash 连接诊断"
           check luci-app-upnp         "UPnP 界面"
           check miniupnpd-nftables    "UPnP 守护进程（nftables 变体）"
-          check kmod-nft-fullcone     "FullCone NAT（ImmortalWrt 树内包，prepare.sh 4/6）"
+          check kmod-nft-fullcone     "FullCone NAT 内核模块（ppe/pkgs）"
+          check luci-app-fullcone     "FullCone 的 LuCI 页（ppe/pkgs）"
+          check nftables-json         "nftables（带 fullcone 表达式补丁）"
           check luci-app-adblock-fast "广告过滤界面"
           check adblock-fast          "广告过滤服务"
 
@@ -180,32 +182,40 @@ jobs:
           find dl -type f -size -1024c -print 2>/dev/null || true
           df -h /
 
-      - name: 预编 FullCone 内核模块（早失败 / 自动降级）
+      - name: 预编 FullCone 链路（早失败 / 自动降级）
         working-directory: ppe-source
         run: |
           set -o pipefail
           LOG=/tmp/prebuild-fullcone.log
-          # fullconenat-nft 是 2023 年代码，只带 6.12+ 的签名补丁，对 6.18 的兼容性
-          # 无法离线判定。放在正式编译前单独试一次：源码本身编不过就自动剔除该项，
-          # 免得整条 90 分钟的构建白跑。
-          if make -j"$(nproc)" V=s package/ax6-pkgs/fullconenat-nft/compile 2>&1 | tee "$LOG"; then
-            echo "OK: kmod-nft-fullcone 预编通过"
-            echo "FULLCONE=kept" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          echo "::warning::kmod-nft-fullcone 预编失败"
-          grep -nE "error|Error [0-9]|undefined reference|No rule" "$LOG" | tail -30 || true
-          if grep -qE 'nft_ext_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)' "$LOG"; then
-            echo "::warning::确认 fullconenat-nft 源码与 6.18 内核不兼容，本次构建剔除 FullCone，其余功能照常编译"
-            sed -i 's|^CONFIG_PACKAGE_kmod-nft-fullcone=y|# CONFIG_PACKAGE_kmod-nft-fullcone is not set|' .config
+          drop_fullcone() {
+            echo "::warning::$1 —— 本次构建剔除 FullCone，其余功能照常编译"
+            sed -i -e 's|^CONFIG_PACKAGE_kmod-nft-fullcone=y|# CONFIG_PACKAGE_kmod-nft-fullcone is not set|' \
+                   -e 's|^CONFIG_PACKAGE_luci-app-fullcone=y|# CONFIG_PACKAGE_luci-app-fullcone is not set|' .config
             make defconfig
             cp .config ../build.config
             if grep -qx 'CONFIG_PACKAGE_kmod-nft-fullcone=y' .config; then
               echo "::error::剔除 FullCone 失败，配置里仍然启用"; exit 1
             fi
             echo "FULLCONE=dropped" >> "$GITHUB_ENV"
+          }
+          # FullCone 要四件套一起编：libnftnl（表达式库）、nftables（语法）、
+          # firewall4（fw4 开关）、内核模块。任何一环不匹配都在这里暴露，
+          # 免得整条 90 分钟的构建白跑。
+          if make -j"$(nproc)" V=s \
+                 package/libs/libnftnl/compile \
+                 package/network/utils/nftables/compile \
+                 package/network/config/firewall4/compile \
+                 package/ax6-pkgs/fullconenat-nft/compile 2>&1 | tee "$LOG"; then
+            echo "OK: FullCone 链路（libnftnl / nftables / firewall4 / kmod）预编通过"
+            echo "FULLCONE=kept" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "::warning::FullCone 链路预编失败"
+          grep -nE "error|Error [0-9]|Hunk #[0-9]+ FAILED|does not apply|undefined reference" "$LOG" | tail -40 || true
+          if grep -qE 'nft_ext_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)|nf_nat_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)|Hunk #[0-9]+ FAILED|patch does not apply' "$LOG"; then
+            drop_fullcone "确认 FullCone 源码或补丁与本树不兼容"
           else
-            echo "::warning::失败原因不是 fullcone 源码本身（可能是内核尚未准备），保持原配置，正式编译时再判定"
+            echo "::warning::失败点不在 FullCone 自身（可能是内核尚未准备），保持原配置，正式编译时再判定"
             echo "FULLCONE=kept" >> "$GITHUB_ENV"
           fi
 
@@ -258,7 +268,7 @@ jobs:
           echo 'EXPERIMENTAL - 未在真机验证 PPE/NSS 转发、WiFi、boot 与回滚。' > ../out/UNVERIFIED.txt
           case "${FULLCONE:-kept}" in
             dropped) echo 'FullCone: 已剔除（fullconenat-nft 源码与 6.18 内核不兼容，见运行日志）' >> ../out/UNVERIFIED.txt ;;
-            *)       echo 'FullCone: 含 kmod-nft-fullcone（需自行加 nftables fullcone 规则才生效）' >> ../out/UNVERIFIED.txt ;;
+            *)       echo 'FullCone: 含 kmod-nft-fullcone + nftables/firewall4 补丁 + LuCI 页（默认关闭，需在 LuCI 或 uci 里开启）' >> ../out/UNVERIFIED.txt ;;
           esac
           echo 'OpenClash: 仅界面，clash/mihomo 内核需自行上传' >> ../out/UNVERIFIED.txt
           ( cd ../out && sha256sum *.ubi *.bin > SHA256SUMS )
