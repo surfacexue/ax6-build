@@ -144,6 +144,17 @@ jobs:
           check luci-ssl              "HTTPS 管理页"
           check luci-theme-argon      "Argon 主题"
           check firewall4             "fw4"
+          check luci-app-openclash    "代理界面（ImmortalWrt luci，prepare.sh 3/6）"
+          check luci-compat           "openclash 依赖的旧版 luci 兼容层"
+          check dnsmasq-full          "openclash/adblock-fast 依赖的 dnsmasq 全功能版"
+          check ruby-yaml             "openclash 依赖的 ruby yaml"
+          check kmod-nft-tproxy       "openclash 透明代理"
+          check kmod-inet-diag        "openclash 连接诊断"
+          check luci-app-upnp         "UPnP 界面"
+          check miniupnpd-nftables    "UPnP 守护进程（nftables 变体）"
+          check kmod-nft-fullcone     "FullCone NAT（ImmortalWrt 树内包，prepare.sh 4/6）"
+          check luci-app-adblock-fast "广告过滤界面"
+          check adblock-fast          "广告过滤服务"
 
           echo "--- 必须存在的架构开关 ---"
           for kv in 'CONFIG_NSS_FIRMWARE_VERSION_12_5=y' \
@@ -168,6 +179,35 @@ jobs:
           make download -j8 || make download -j1 V=s
           find dl -type f -size -1024c -print 2>/dev/null || true
           df -h /
+
+      - name: 预编 FullCone 内核模块（早失败 / 自动降级）
+        working-directory: ppe-source
+        run: |
+          set -o pipefail
+          LOG=/tmp/prebuild-fullcone.log
+          # fullconenat-nft 是 2023 年代码，只带 6.12+ 的签名补丁，对 6.18 的兼容性
+          # 无法离线判定。放在正式编译前单独试一次：源码本身编不过就自动剔除该项，
+          # 免得整条 90 分钟的构建白跑。
+          if make -j"$(nproc)" V=s package/ax6-pkgs/fullconenat-nft/compile 2>&1 | tee "$LOG"; then
+            echo "OK: kmod-nft-fullcone 预编通过"
+            echo "FULLCONE=kept" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "::warning::kmod-nft-fullcone 预编失败"
+          grep -nE "error|Error [0-9]|undefined reference|No rule" "$LOG" | tail -30 || true
+          if grep -qE 'nft_ext_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)' "$LOG"; then
+            echo "::warning::确认 fullconenat-nft 源码与 6.18 内核不兼容，本次构建剔除 FullCone，其余功能照常编译"
+            sed -i 's|^CONFIG_PACKAGE_kmod-nft-fullcone=y|# CONFIG_PACKAGE_kmod-nft-fullcone is not set|' .config
+            make defconfig
+            cp .config ../build.config
+            if grep -qx 'CONFIG_PACKAGE_kmod-nft-fullcone=y' .config; then
+              echo "::error::剔除 FullCone 失败，配置里仍然启用"; exit 1
+            fi
+            echo "FULLCONE=dropped" >> "$GITHUB_ENV"
+          else
+            echo "::warning::失败原因不是 fullcone 源码本身（可能是内核尚未准备），保持原配置，正式编译时再判定"
+            echo "FULLCONE=kept" >> "$GITHUB_ENV"
+          fi
 
       - name: 编译固件
         working-directory: ppe-source
@@ -216,6 +256,11 @@ jobs:
           cp .config ../out/build.config
           cp ../out/IMAGE-AUDIT.md ../out/AX6-ppe-nss-IMAGE-AUDIT.md
           echo 'EXPERIMENTAL - 未在真机验证 PPE/NSS 转发、WiFi、boot 与回滚。' > ../out/UNVERIFIED.txt
+          case "${FULLCONE:-kept}" in
+            dropped) echo 'FullCone: 已剔除（fullconenat-nft 源码与 6.18 内核不兼容，见运行日志）' >> ../out/UNVERIFIED.txt ;;
+            *)       echo 'FullCone: 含 kmod-nft-fullcone（需自行加 nftables fullcone 规则才生效）' >> ../out/UNVERIFIED.txt ;;
+          esac
+          echo 'OpenClash: 仅界面，clash/mihomo 内核需自行上传' >> ../out/UNVERIFIED.txt
           ( cd ../out && sha256sum *.ubi *.bin > SHA256SUMS )
           echo "--- 体积 ---"
           ls -lh ../out/

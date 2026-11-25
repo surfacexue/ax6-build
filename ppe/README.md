@@ -89,6 +89,42 @@ part_num="$(fw_printenv -n flag_boot_rootfs 2>/dev/null || true)"
 
 本线用 12.5。代价写在上面表里：**放弃 802.11s mesh**。本机不用 mesh，可以接受。
 
+## 功能包（2026-11-25 增补）
+
+基座 `ppe-tiny` 原本不带代理。按需求补了四组，源码与依赖归属：
+
+| 功能 | 包 | 来源 | 说明 |
+|---|---|---|---|
+| 代理 | `luci-app-openclash` | **ImmortalWrt `luci@openwrt-25.12`**（openwrt 官方 luci 没有） | 只有界面，clash/mihomo 内核不随包发布 |
+| | `luci-compat` `dnsmasq-full` `ruby` `ruby-yaml` `bash` `unzip` `ip-full` `kmod-nft-tproxy` `kmod-inet-diag` | openwrt luci / packages / 内核 | openclash 的硬依赖，缺一个 defconfig 就会静默把 openclash 丢掉 |
+| UPnP | `luci-app-upnp` + `miniupnpd-nftables` | openwrt luci / packages | 游戏主机自动端口映射；nftables 变体，和 fw4 同栈 |
+| FullCone | `kmod-nft-fullcone` | **ImmortalWrt 树内 `package/network/utils/fullconenat-nft`**（任何 feed 都没有） | 源码 `fullcone-nat-nftables/nft-fullcone` @`07d93b6`，带 6.12+ 内核补丁 |
+| 广告过滤 | `luci-app-adblock-fast` + `adblock-fast` | openwrt luci / packages | 走 dnsmasq-full，配 openclash 时可二者择一 |
+
+没有装 `mosdns` / `v2ray-geodata`：那是分流 DNS 用的，多占约 20 MiB，本机走 PC 端代理用不上。
+
+### 刷完后要手动做的三件事
+
+1. **OpenClash 内核**：界面里「配置文件 → 版本更新」下载 mihomo 内核，或本地文件上传。
+   LuCI 装好但没内核时，OpenClash 起不来是正常现象。
+2. **FullCone 规则**：模块装上只是有了 nft 表达式，规则要自己加（fw4 的 `srcnat_wan` 链）：
+   ```sh
+   nft insert rule inet fw4 srcnat_wan meta nfproto ipv4 fullcone counter comment "FullCone NAT"
+   ```
+   只对 UDP 生效（TCP 等价于 MASQUERADE）。验证：`nft list chain inet fw4 srcnat_wan`。
+3. **UPnP**：服务默认可能未启用，LuCI「服务 → UPnP」里勾「启用」并指定内网接口。
+
+### FullCone 的编译风险已做自动化兜底
+
+`fullconenat-nft` 是 2023 年代码，只有 6.12+ 的签名补丁，对 6.18 的兼容性无法离线判定。
+workflow 在正式编译前先单独预编这个模块：
+
+- 编过 → 继续，产物里 `UNVERIFIED.txt` 标 `FullCone: 含 kmod-nft-fullcone`；
+- 报的是 `nft_ext_fullcone.c:<行>: error` → 自动从 `.config` 剔除该项再整体编译，
+  其余功能照常出固件，`UNVERIFIED.txt` 标 `FullCone: 已剔除`。
+
+这样最坏情况不会白跑 90 分钟。
+
 ## 怎么跑
 
 Actions → **Build AX6 PPE-NSS Firmware** → Run workflow。两个输入都留空即用默认钉住的 commit。
