@@ -236,6 +236,16 @@ jobs:
           else
             echo "OK  没有任何请求的包被丢弃"
           fi
+          # ruby 的 YJIT 会连带编 rust/host（immortalwrt 的 ruby Makefile：
+          # PKG_BUILD_DEPENDS:=ruby/host RUBY_ENABLE_YJIT:rust/host），而 rustc 自举要从
+          # ci 下载 LLVM，run #2 就死在 "ERROR: failed to download llvm from ci"。
+          # 这里一旦发现它开着就直接停，别用 50 分钟去换同一句报错。
+          if grep -qx 'CONFIG_RUBY_ENABLE_YJIT=y' .config; then
+            echo "::error::YJIT 被打开，会连带编 rust/host（易碎的 LLVM 下载）；见 libwrt/configs/libwrt-ax6.config 的注释"
+            exit 1
+          fi
+          echo "OK  未启用 ruby YJIT，rust/host 不在构建路径上"
+
           if grep -qx 'kmod-nft-fullcone' /tmp/dropped.txt; then
             echo "::warning::kmod-nft-fullcone 不在本树内 → 关闭 luci-app-turboacc，避免 package/install 阶段依赖失败"
             sed -i -e 's|^CONFIG_PACKAGE_luci-app-turboacc=y|# CONFIG_PACKAGE_luci-app-turboacc is not set|' \
