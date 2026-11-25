@@ -157,6 +157,16 @@ jobs:
           check nftables-json         "nftables（带 fullcone 表达式补丁）"
           check luci-app-adblock-fast "广告过滤界面"
           check adblock-fast          "广告过滤服务"
+          check dnsmasq-full          "adblock-fast 的 nftset 后端（普通变体不编 HAVE_NFTSET）"
+
+          echo "--- 互斥项：dnsmasq 三个变体抢同一组文件 ---"
+          for bad in CONFIG_PACKAGE_dnsmasq=y CONFIG_PACKAGE_dnsmasq-dhcpv6=y; do
+            if grep -qx "$bad" .config; then
+              echo "::error::$bad 与 dnsmasq-full 提供同一组文件，会撞 package/install"; fail=1
+            else
+              echo "OK   $bad 为 not set"
+            fi
+          done
 
           echo "--- 必须存在的架构开关 ---"
           for kv in 'CONFIG_NSS_FIRMWARE_VERSION_12_5=y' \
