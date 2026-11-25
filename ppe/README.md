@@ -131,14 +131,20 @@ part_num="$(fw_printenv -n flag_boot_rootfs 2>/dev/null || true)"
 ### FullCone 的编译风险已做自动化兜底
 
 内核模块是 2023 年代码（上游仓库已 archived），用户态三个补丁也只是版本核对过、没在
-6.18 上编过。workflow 在正式编译前先单独编 FullCone 四件套：
+6.18 上编过。workflow 分两层判：
 
-- 编过 → 继续，产物里 `UNVERIFIED.txt` 标 `FullCone: 含 …`；
-- 报的是 `nft_ext_fullcone.c` / `nf_nat_fullcone.c` 的编译错误，或补丁打不上
-  （`Hunk #N FAILED` / `patch does not apply`）→ 自动从 `.config` 剔除 FullCone 再整体编译，
-  其余功能照常出固件，`UNVERIFIED.txt` 标 `FullCone: 已剔除`。
+1. **静态自检**（不依赖工具链，一定有结论）：三份补丁必须在位、`libnftnl` 补丁里真有
+   `expr/fullcone`、`nftables` 补丁里真有 fullcone 语法、`firewall4` 的 Makefile 声明了
+   `kmod-nft-fullcone` 依赖。缺任何一条就自动剔除 FullCone 再整体编译。
+2. **试编译**（只在 `staging_dir/toolchain-*` 已存在时执行）：全新 job 跑到这一步时工具链
+   还没建，`package/.../compile` 必然失败，所以先看有没有工具链，没有就明说跳过。
 
-这样最坏情况不会白跑 90 分钟。
+剔除的判定标准是报错落在 `nft_ext_fullcone.c` / `nf_nat_fullcone.c`，或补丁打不上
+（`Hunk #N FAILED` / `patch does not apply`）。剔除后其余功能照常出固件，
+`UNVERIFIED.txt` 标 `FullCone: 已剔除`；保留则标 `FullCone: 含 …`。
+
+这样最坏情况不会白跑 90 分钟。第 2 轮（`506b868`）的实例：试编译被跳过、静态自检通过，
+四件套在正式编译里全部编过——所以「预编失败」的告警曾经是误报，已在上面的改法里消掉。
 
 ## 怎么跑
 
@@ -154,6 +160,61 @@ AX6-ppe-nss-IMAGE-AUDIT.md     ← 体积 gate 结果
 build.config
 SHA256SUMS
 ```
+
+### 首个跑通的产物：PPE #2 校验记录（2026-11-25）
+
+第一次完整跑通：run #2（id `45543931799`，commit `506b868`），12:01 触发、13:14 结束，
+编译步 62 分钟（ccache 与 dl 都命中）。产物 `ax6-ppe-nss-45543931799.zip`（67.5 MB）。
+下面是下载后本地复核的结果，不是 CI 自述。
+
+**哈希**（与包内 `SHA256SUMS` 逐字节比对一致）
+
+| 镜像 | 字节 | SHA256 |
+|---|---|---|
+| `AX6-ppe-nss-factory.ubi` | 36,962,304 | `01c613b7beb3ee756548bf9d97f66ffa4bc6507820d108f277b5eae5679ac848` |
+| `AX6-ppe-nss-sysupgrade.bin` | 35,399,946 | `d647f93f9b3a5ff61b8d9499e2a6b19f865d52fe251c07007c1068b93043c00c` |
+
+**结构校验**：解包后把两个镜像改名成 `redmi_ax6-stock-{factory.ubi,sysupgrade.bin}`
+（脚本按文件名断言），再复跑本仓库的校验器：
+
+```sh
+python3 ppe/scripts/check-stock-image.py redmi_ax6-stock-sysupgrade.bin redmi_ax6-stock-factory.ubi
+```
+
+结果 **PASS**：
+
+- factory 35.25 MiB，282 × 128 KiB 抹除块，每块 EC 头 `UBI#` 与 VID 头 `UBI!` 都在，卷 0/1 齐
+- sysupgrade 33.76 MiB，tar 内含 `kernel`(5.70 MiB) / `root`(28.06 MiB，squashfs) / `CONTROL`
+- 距 64 MiB 硬门余量 28 MiB。按 818 LEB × 126,976 B 折算：kernel 占 47 LEB、rootfs 占 232 LEB，
+  overlay 还能用约 539 LEB ≈ 65 MiB
+
+**目标匹配**：`CONTROL` 为 `BOARD=redmi_ax6-stock`；内核 FIT（魔数 `d00dfeed`）的 DTB
+compatible 含 `redmi,ax6-stock`，不含 `xiaomi,ax3600`。刷在单卷 stock 布局的机器上才会被接受。
+
+**关键包**（manifest 共 237 条，节选）
+
+| 包 | 版本 | 说明 |
+|---|---|---|
+| `kmod-nft-fullcone` | 6.18.60.2023.05.17~07d93b62-r4 | 源码钉在 `07d93b6` |
+| `nftables-json` | 1.1.7-r1 | 带 fullcone 表达式补丁 |
+| `libnftnl11` | 1.3.2-r1 | 带 `expr/fullcone.c`，`PKG_FIXUP:=autoreconf` |
+| `firewall4` | 2026.10.29~e6f600c4-r1 | 依赖里已加 `kmod-nft-fullcone` |
+| `luci-app-fullcone` | 0 | 默认关闭，需手动开 |
+| `luci-app-homeproxy` | 0 | 代理前端 |
+| `sing-box-tiny` | 1.14.0-r1 | 无 QUIC / gVisor |
+| `kmod-nft-tproxy` | 6.18.60-r1 | HomeProxy 透明代理 |
+| `kmod-nss-wifi-drv` | 6.18.60-r1 | NSS WiFi；本线无 ECM |
+| `ttyd` / `luci-app-ttyd` | 1.7.7-r1 / 26.328 | |
+| `adblock-fast` | 1.2.4-r4 | |
+| `luci-theme-argon` | 3.1.4-r20261113 | |
+
+**两处已知瑕疵**
+
+- `luci-app-fullcone`、`luci-app-homeproxy`、`luci-i18n-homeproxy-zh-cn`、
+  `luci-i18n-argon-config-zh-cn` 的 apk 版本号是 `0`：这几个包的 Makefile 自己不写
+  `PKG_VERSION`（`luci-app-fullcone` 与上游 `luci-app-homeproxy` 都是这样），版本由
+  `luci.mk` 兜底，apk 装了能跑，只是以后从仓库升级时版本比较会失真。
+- FullCone 装上了但配置默认关闭，规则里不会出现 fullcone 表达式。
 
 ## 已知风险（按严重度）
 
