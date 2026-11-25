@@ -198,9 +198,34 @@ jobs:
             fi
             echo "FULLCONE=dropped" >> "$GITHUB_ENV"
           }
-          # FullCone 要四件套一起编：libnftnl（表达式库）、nftables（语法）、
-          # firewall4（fw4 开关）、内核模块。任何一环不匹配都在这里暴露，
-          # 免得整条 90 分钟的构建白跑。
+          # 第一层：静态自检。这一步不依赖工具链，任何时候都能做，也一定能给出结论。
+          #   - 三份补丁必须随仓库到齐（prepare.sh 拷进各包的 patches/）
+          #   - 补丁里必须真的带 fullcone 表达式/符号（拷错了包也算不过）
+          #   - firewall4 的 Makefile 必须声明 kmod 依赖
+          for p in package/libs/libnftnl/patches/900-fullcone.patch \
+                   package/network/utils/nftables/patches/900-fullcone.patch \
+                   package/network/config/firewall4/patches/900-fullcone.patch; do
+            [ -s "$p" ] || drop_fullcone "补丁文件缺失或为空：$p"
+          done
+          grep -q 'expr/fullcone' package/libs/libnftnl/patches/900-fullcone.patch \
+            || drop_fullcone "libnftnl 补丁里没有 fullcone 表达式源文件"
+          grep -q 'fullcone' package/network/utils/nftables/patches/900-fullcone.patch \
+            || drop_fullcone "nftables 补丁里没有 fullcone 语法"
+          grep -q 'kmod-nft-fullcone' package/network/config/firewall4/Makefile \
+            || drop_fullcone "firewall4 的 Makefile 没声明 kmod-nft-fullcone 依赖"
+          echo "OK: FullCone 三份补丁到位，符号与依赖齐全"
+
+          # 第二层：试编译。FullCone 要四件套一起编——libnftnl（表达式库）、nftables（语法）、
+          # firewall4（fw4 开关）、内核模块；真正的不兼容只有编过才知道。
+          # 但 package/.../compile 依赖已建好的工具链与 staging_dir：全新 job 跑到这里时
+          # 它们还不存在，make 会立刻失败（run #2 就是这样，1.2 秒失败、还被误报成
+          # "FullCone 预编失败"）。所以先看有没有工具链，没有就明说跳过。
+          if ! ls -d staging_dir/toolchain-* >/dev/null 2>&1; then
+            echo "::notice::工具链尚未构建，跳过试编译；四件套由正式编译验证（静态自检已通过）"
+            echo "FULLCONE=kept" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           if make -j"$(nproc)" V=s \
                  package/libs/libnftnl/compile \
                  package/network/utils/nftables/compile \
@@ -210,12 +235,12 @@ jobs:
             echo "FULLCONE=kept" >> "$GITHUB_ENV"
             exit 0
           fi
-          echo "::warning::FullCone 链路预编失败"
-          grep -nE "error|Error [0-9]|Hunk #[0-9]+ FAILED|does not apply|undefined reference" "$LOG" | tail -40 || true
+          echo "--- 预编失败，日志末尾 ---"
+          tail -40 "$LOG" || true
           if grep -qE 'nft_ext_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)|nf_nat_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)|Hunk #[0-9]+ FAILED|patch does not apply' "$LOG"; then
             drop_fullcone "确认 FullCone 源码或补丁与本树不兼容"
           else
-            echo "::warning::失败点不在 FullCone 自身（可能是内核尚未准备），保持原配置，正式编译时再判定"
+            echo "::warning::预编失败但报错不在 FullCone 自身（见上面日志），保持原配置，由正式编译判定"
             echo "FULLCONE=kept" >> "$GITHUB_ENV"
           fi
 
