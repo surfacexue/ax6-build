@@ -201,8 +201,13 @@ jobs:
           cd openwrt
           make defconfig
           echo "--- 目标设备 ---"
-          grep -E '^CONFIG_TARGET_qualcommax_ipq807x_DEVICE_redmi_ax6-stock=y' .config || {
+          # 两种写法都要认：本线配置开了 CONFIG_TARGET_MULTI_PROFILE=y，defconfig 之后
+          # 只会留下 CONFIG_TARGET_DEVICE_<target>_DEVICE_<dev>=y（每设备选型），老的
+          # CONFIG_TARGET_<target>_DEVICE_<dev>=y（单 profile）根本不生成。run #1 就是
+          # 只认了老符号，明明选上了设备却被判「未启用」而中止。
+          grep -E '^CONFIG_(TARGET_qualcommax_ipq807x_DEVICE_redmi_ax6-stock|TARGET_DEVICE_qualcommax_ipq807x_DEVICE_redmi_ax6-stock)=y' .config || {
             echo "::error::redmi_ax6-stock 未启用"; exit 1; }
+          grep -E '^CONFIG_TARGET_(qualcommax|qualcommax_ipq807x|PROFILE|DEVICE_)' .config | head -8 || true
           echo "--- NSS 内存 profile（必须是 MEDIUM）---"
           grep -E '^CONFIG_NSS_MEM_PROFILE_' .config || true
 
@@ -343,6 +348,7 @@ jobs:
       - name: 失败诊断
         if: failure() || cancelled()
         run: |
+          set +e   # 诊断步一旦自己非 0，后面的 Summary/artifact 就全丢（run #1 的教训）
           LOG=/tmp/build.log
           [ -f "$LOG" ] || LOG=/tmp/build_serial.log
           # 失败发生在编译之前（配置/校验步）时两个日志都不存在；此处必须兜底，
