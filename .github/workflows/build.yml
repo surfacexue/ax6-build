@@ -107,7 +107,7 @@ jobs:
           du -sh .
 
       - name: 恢复 ccache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           # 与 rules.mk 里 CCACHE_DIR 的落盘位置一致（$(TOPDIR)/.ccache）
           path: /mnt/ax6build/openwrt/.ccache
@@ -242,6 +242,36 @@ jobs:
           echo "--- 内核版本 ---"
           grep -E '^CONFIG_LINUX_6_12' .config | head -3 || true
 
+      # make defconfig 对"树里根本没有的包"是静默丢弃：一个字不报，配置文件里那行直接消失。
+      # 第 13 轮就栽在这——ax6.config 请求了 kmod-nft-fullcone（只在 ImmortalWrt 树内维护），
+      # defconfig 把它丢掉，可 luci-app-turboacc 的 ipk 依赖里仍写着 +kmod-nft-fullcone，
+      # 于是白编 4 小时后在 package/install 报 "unable to select packages"。
+      # 这里把"请求了但没进 .config"的包在开工 10 分钟内列出来，只告警不拦。
+      - name: 自检配置是否被静默丢弃
+        run: |
+          set +e
+          cd openwrt
+          list_req() { grep -E '^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y$' "$1" \
+                         | sed -E 's/^CONFIG_PACKAGE_(.*)=y$/\1/' | sort -u; }
+          list_req ../ax6.config > /tmp/req.txt
+          list_req .config      > /tmp/got.txt
+          comm -23 /tmp/req.txt /tmp/got.txt > /tmp/dropped.txt
+          req=$(wc -l < /tmp/req.txt); got=$(wc -l < /tmp/got.txt); n=$(wc -l < /tmp/dropped.txt)
+          echo "请求 $req 个包 → 进 .config $got 个，被静默丢弃 $n 个"
+          if [ "$n" -gt 0 ]; then
+            # 依赖了"不存在的包"的已选包，是最危险的一类：编译能走完，最后装包才炸
+            echo "--- 丢弃清单 ---"; cat /tmp/dropped.txt
+            echo "::warning::$n 个包请求了但树里没有（见 Summary 表格）"
+            { echo "### 配置被静默丢弃的包（$n）"; echo
+              echo "\`make defconfig\` 不会为这些包报错，只把它们从 .config 里删掉；"
+              echo "若某个已选包的依赖里有它们，编译会在最后的 package/install 阶段失败。"; echo
+              echo "| 包 |"; echo "|---|"
+              sed 's/^/| `/' /tmp/dropped.txt | sed 's/$/` |/'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "OK  没有任何请求的包被丢弃"
+          fi
+
       - name: 校验核心功能包已启用
         run: |
           set +e
@@ -281,12 +311,12 @@ jobs:
           warn kmod-nf-nathelper
           warn kmod-nf-nathelper-extra
           warn kmod-nf-nathelper-rtsp
-          warn kmod-nft-fullcone
+          # kmod-nft-fullcone / luci-app-turboacc 已从 ax6.config 移除（主线无该 kmod，
+          # turboacc 的 NFT_FULLCONE 选项会硬依赖它），不再作为预期项检查。
           warn luci-app-wol
           warn luci-theme-argon
           warn luci-app-openclash
           warn luci-app-mosdns
-          warn luci-app-turboacc
           warn luci-app-vlmcsd
           warn luci-app-cpufreq
           warn autocore
@@ -302,7 +332,7 @@ jobs:
       # 换源码树后 dl 内容整体不同（qosmio 25.12 的 tarball 版本与旧树不一致），
       # 旧 key 一律不会命中，第一轮必然全量下载——这是预期行为。
       - name: 恢复 dl 缓存
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /mnt/ax6build/openwrt/dl
           # 精确 key 由仓库状态算出：ax6.config 或本文件不变就命中上一次的归档、不产生新条目；
@@ -452,3 +482,22 @@ jobs:
           name: ax6-nss-wireguard-firmware
           path: out/
           retention-days: 30
+
+      # 失败也要留缓存：第 13 轮编了 4 小时死在最后的 package/install，而 actions/cache 的
+      # post 步在 job 失败时被跳过（日志里 "Post 恢复 ccache ... skipped"）——等于每轮从冷
+      # 缓存重来。拆成 restore + always() 的 save 两步。
+      - name: 保存 ccache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/ax6build/openwrt/.ccache
+          key: ccache-qosmio2512-${{ github.run_id }}
+
+      - name: 保存 dl 缓存
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/ax6build/openwrt/dl
+          key: dl-${{ hashFiles('ax6.config') }}-${{ hashFiles('.github/workflows/build.yml') }}

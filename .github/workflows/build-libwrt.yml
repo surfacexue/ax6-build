@@ -88,7 +88,7 @@ jobs:
           du -sh .
 
       - name: 恢复 ccache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /mnt/ax6build/openwrt/.ccache
           key: ccache-libwrt2512-${{ github.run_id }}
@@ -206,6 +206,40 @@ jobs:
           echo "--- NSS 内存 profile（必须是 MEDIUM）---"
           grep -E '^CONFIG_NSS_MEM_PROFILE_' .config || true
 
+      # 与主线同一套自检：defconfig 静默丢弃树里没有的包。LibWrt 的配置仍请求
+      # luci-app-turboacc + kmod-nft-fullcone（ImmortalWrt 系树里通常有，但不是必然），
+      # 一旦 kmod 被丢弃，turboacc 的 ipk 依赖会让编译在最后阶段白炸 4 小时。
+      # 这里检测到就把 turboacc 整包关掉（它少了 fullcone 也只剩 offload/BBR，主线已证明不值得冒险）。
+      - name: 自检配置是否被静默丢弃
+        run: |
+          set +e
+          cd openwrt
+          list_req() { grep -E '^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y$' "$1" \
+                         | sed -E 's/^CONFIG_PACKAGE_(.*)=y$/\1/' | sort -u; }
+          list_req ../libwrt/configs/libwrt-ax6.config > /tmp/req.txt
+          list_req .config > /tmp/got.txt
+          comm -23 /tmp/req.txt /tmp/got.txt > /tmp/dropped.txt
+          req=$(wc -l < /tmp/req.txt); got=$(wc -l < /tmp/got.txt); n=$(wc -l < /tmp/dropped.txt)
+          echo "请求 $req 个包 → 进 .config $got 个，被静默丢弃 $n 个"
+          if [ "$n" -gt 0 ]; then
+            echo "--- 丢弃清单 ---"; cat /tmp/dropped.txt
+            echo "::warning::$n 个包请求了但树里没有（见 Summary 表格）"
+            { echo "### 配置被静默丢弃的包（$n）"; echo
+              echo "| 包 |"; echo "|---|"
+              sed 's/^/| `/' /tmp/dropped.txt | sed 's/$/` |/'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "OK  没有任何请求的包被丢弃"
+          fi
+          if grep -qx 'kmod-nft-fullcone' /tmp/dropped.txt; then
+            echo "::warning::kmod-nft-fullcone 不在本树内 → 关闭 luci-app-turboacc，避免 package/install 阶段依赖失败"
+            sed -i -e 's|^CONFIG_PACKAGE_luci-app-turboacc=y|# CONFIG_PACKAGE_luci-app-turboacc is not set|' \
+                   -e 's|^\(CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_.*\)=y|\# \1 is not set|' \
+                   -e 's|^CONFIG_PACKAGE_luci-i18n-turboacc-zh-cn=y|# CONFIG_PACKAGE_luci-i18n-turboacc-zh-cn is not set|' \
+                   -e 's|^CONFIG_PACKAGE_kmod-nft-fullcone=y|# CONFIG_PACKAGE_kmod-nft-fullcone is not set|' .config
+            grep -nE 'turboacc|kmod-nft-fullcone' .config | head -10 || true
+          fi
+
       - name: 校验核心功能包已启用
         run: |
           set +e
@@ -278,7 +312,7 @@ jobs:
 
       # dl/ 是纯输入，缓存安全；LibWrt 的 tarball 与 qosmio 不同，首轮必然全量下载
       - name: 恢复 dl 缓存
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /mnt/ax6build/openwrt/dl
           key: dl-libwrt-${{ hashFiles('libwrt/configs/libwrt-ax6.config') }}-${{ hashFiles('.github/workflows/build-libwrt.yml') }}
@@ -373,3 +407,22 @@ jobs:
           name: ax6-libwrt-firmware
           path: out/
           retention-days: 30
+
+      # 失败也要留缓存：第 13 轮编了 4 小时死在最后的 package/install，而 actions/cache 的
+      # post 步在 job 失败时被跳过（日志里 "Post 恢复 ccache ... skipped"）——等于每轮从冷
+      # 缓存重来。拆成 restore + always() 的 save 两步。
+      - name: 保存 ccache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/ax6build/openwrt/.ccache
+          key: ccache-libwrt2512-${{ github.run_id }}
+
+      - name: 保存 dl 缓存
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/ax6build/openwrt/dl
+          key: dl-libwrt-${{ hashFiles('libwrt/configs/libwrt-ax6.config') }}-${{ hashFiles('.github/workflows/build-libwrt.yml') }}
