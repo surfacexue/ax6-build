@@ -4,7 +4,7 @@
 #
 # 与上游 prepare-ppe-tiny.sh 的差异：
 #   - 不并入 HomeProxy / sing-box（但补入 OpenClash 的 LuCI 包，见 3/6）
-#   - 从 ImmortalWrt 25.12 取 Argon 主题 + luci-app-openclash（同一份克隆，不额外拉）
+#   - 从 ImmortalWrt 25.12 取 Argon 主题 + luci-app-homeproxy（同一份克隆，不额外拉）
 #   - 从 ImmortalWrt 25.12 取 fullconenat-nft（openwrt 任何 feed 都没有 kmod-nft-fullcone）
 #   - 追加「单槽容错」修补：上游把 flag_boot_rootfs 缺失当致命错误，本机会因此拒刷
 set -Eeuo pipefail
@@ -15,7 +15,7 @@ set -Eeuo pipefail
   echo "ERROR: 缺少 $TINY_REPO/scripts/prepare-ppe-experiment.sh" >&2; exit 1; }
 
 # fullconenat-nft 的来源由 ppe/pkgs/ 自己钉住（commit 与补丁都在仓库里），
-# 这里只保留 ImmortalWrt luci 的版本变量给 argon / openclash 用
+# 这里只保留 ImmortalWrt luci 的版本变量给 argon / homeproxy 用
 IMM_BRANCH="${IMM_BRANCH:-openwrt-25.12}"
 
 echo '===== 1/6 stock 布局移植（复用上游 guarded 脚本）====='
@@ -29,37 +29,41 @@ else
   echo 'src-git nss https://github.com/JuliusBairaktaris/nss-packages.git;ppe-nss' >> feeds.conf
 fi
 
-echo "===== 3/6 从 ImmortalWrt ${IMM_BRANCH} 取 Argon 主题 + OpenClash ====="
+echo "===== 3/6 从 ImmortalWrt ${IMM_BRANCH} 取 Argon 主题 + HomeProxy ====="
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 git clone --depth 1 --single-branch --branch "$IMM_BRANCH" \
   https://github.com/immortalwrt/luci.git "$work/luci"
 git -C "$work/luci" rev-parse HEAD > ./LUCI-SHA.txt
-argon_src="$work/luci/themes/luci-theme-argon"
-[[ -f "$argon_src/Makefile" ]] || { echo 'ERROR: 上游 luci 缺少 argon 主题' >&2; exit 1; }
 mkdir -p package/ax6-luci
-cp -a "$argon_src" package/ax6-luci/
+for entry in themes/luci-theme-argon applications/luci-app-homeproxy; do
+  [[ -f "$work/luci/$entry/Makefile" ]] || {
+    echo "ERROR: 上游 luci 缺少 $entry（上游可能已挪位置）" >&2; exit 1; }
+  cp -a "$work/luci/$entry" package/ax6-luci/
+done
 python3 - <<'PY'
 from pathlib import Path
-p = Path('package/ax6-luci/luci-theme-argon/Makefile')
-s = p.read_text()
-old = 'include ../../luci.mk'
-if s.count(old) != 1:
-    raise SystemExit(f'ERROR: argon Makefile include 与预期不符（命中 {s.count(old)} 次）')
-p.write_text(s.replace(old, 'include $(TOPDIR)/feeds/luci/luci.mk'))
-print('OK: argon Makefile include 已改指 feeds/luci/luci.mk')
-PY
 
-# OpenClash：openwrt 官方 luci 没有这个包，只有 ImmortalWrt 的 luci 里有（纯 LuCI，不带内核）
-openclash_src="$work/luci/applications/luci-app-openclash"
-[[ -f "$openclash_src/Makefile" ]] || {
-  echo 'ERROR: 上游 luci 缺少 luci-app-openclash（上游可能已挪位置）' >&2; exit 1; }
-cp -a "$openclash_src" package/ax6-luci/
-[[ -f package/ax6-luci/luci-app-openclash/Makefile ]] || {
-  echo 'ERROR: 拷贝后仍无 luci-app-openclash/Makefile' >&2; exit 1; }
-grep -q 'luci-compat' package/ax6-luci/luci-app-openclash/Makefile || {
-  echo 'ERROR: luci-app-openclash 依赖声明与预期不符，需人工复核' >&2; exit 1; }
-echo 'OK: luci-app-openclash 已并入 package/ax6-luci（内核 clash/mihomo 需在设备上另行上传）'
+custom = Path('package/ax6-luci')
+for name in ('luci-theme-argon', 'luci-app-homeproxy'):
+    p = custom / name / 'Makefile'
+    s = p.read_text()
+    old = 'include ../../luci.mk'
+    if s.count(old) != 1:
+        raise SystemExit(f'ERROR: {p} 的 include 与预期不符（命中 {s.count(old)} 次）')
+    p.write_text(s.replace(old, 'include $(TOPDIR)/feeds/luci/luci.mk'))
+print('OK: argon / homeproxy 的 include 已改指 feeds/luci/luci.mk')
+
+# HomeProxy 默认依赖完整 sing-box；本线只装 sing-box-tiny（体积与 AX6 内存都吃紧）
+hp = custom / 'luci-app-homeproxy' / 'Makefile'
+s = hp.read_text()
+if s.count('+sing-box \\') != 1:
+    raise SystemExit('ERROR: HomeProxy 依赖行变了，别把完整 sing-box 拖进来')
+hp.write_text(s.replace('+sing-box \\', '+sing-box-tiny \\'))
+if '+sing-box-tiny \\' not in hp.read_text():
+    raise SystemExit('ERROR: 未能把 HomeProxy 依赖改成 sing-box-tiny')
+print('OK: HomeProxy 已改依赖 sing-box-tiny')
+PY
 
 echo '===== 4/6 FullCone 全家桶（内核模块 + 用户态三件套 + LuCI 页）====='
 # 只有内核模块是没用的：官方 nftables/libnftnl 不认 fullcone 表达式，firewall4 也没有
@@ -141,8 +145,44 @@ assert 'part_num="$(fw_printenv -n flag_boot_rootfs 2>/dev/null || true)"' in p.
 print('OK: platform.sh 已改为单槽容错（空值 -> 0 -> CI_UBIPART=rootfs）')
 PY
 
-echo '===== 6/6 更新与安装 feeds ====='
+echo '===== 6/6 更新与安装 feeds（含 sing-box-tiny 精简）====='
 ./scripts/feeds update -a
+
+# sing-box-tiny 在 packages 里默认带 with_quic（且未设 SMALL_FLASH 时还带 with_gvisor）。
+# 本机只用 VLESS Reality / Shadowsocks，留 uTLS（指纹）与 Clash API（HomeProxy 状态）就够。
+python3 - <<'PY'
+from pathlib import Path
+
+sb = Path('feeds/packages/net/sing-box/Makefile')
+if not sb.is_file():
+    raise SystemExit('ERROR: feeds/packages/net/sing-box/Makefile 不存在，feeds 结构变了')
+s = sb.read_text()
+old = """ifeq ($(BUILD_VARIANT),tiny)
+ifeq ($(CONFIG_SMALL_FLASH),)
+GO_PKG_TAGS:=with_gvisor
+endif
+GO_PKG_TAGS:=$(subst $(space),$(comma),$(strip $(GO_PKG_TAGS) with_quic with_utls with_clash_api badlinkname tfogo_checklinkname0))
+else"""
+new = """ifeq ($(BUILD_VARIANT),tiny)
+# AX6 精简：只留 uTLS（Reality 指纹）与 Clash API（HomeProxy 状态），去掉 QUIC 与 gVisor
+GO_PKG_TAGS:=$(subst $(space),$(comma),$(strip with_utls with_clash_api badlinkname tfogo_checklinkname0))
+else"""
+if s.count(old) == 1:
+    sb.write_text(s.replace(old, new))
+    print('OK: sing-box-tiny 已去掉 QUIC / gVisor')
+else:
+    # 只影响体积，不阻断构建；照实打出来，便于事后核对
+    print('WARN: sing-box 的 tiny 分支与预期不符，未做精简（体积会大一些），当前分支内容：')
+    inside = False
+    for line in s.splitlines():
+        if line.startswith('ifeq ($(BUILD_VARIANT),tiny)'):
+            inside = True
+        if inside:
+            print('   ', line)
+        if inside and line.startswith('else'):
+            break
+PY
+
 ./scripts/feeds install -a
 
 echo '--- 溯源 ---'

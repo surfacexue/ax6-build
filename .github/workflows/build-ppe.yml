@@ -144,12 +144,12 @@ jobs:
           check luci-ssl              "HTTPS 管理页"
           check luci-theme-argon      "Argon 主题"
           check firewall4             "fw4"
-          check luci-app-openclash    "代理界面（ImmortalWrt luci，prepare.sh 3/6）"
-          check luci-compat           "openclash 依赖的旧版 luci 兼容层"
-          check dnsmasq-full          "openclash/adblock-fast 依赖的 dnsmasq 全功能版"
-          check ruby-yaml             "openclash 依赖的 ruby yaml"
-          check kmod-nft-tproxy       "openclash 透明代理"
-          check kmod-inet-diag        "openclash 连接诊断"
+          check luci-app-homeproxy    "代理界面（ImmortalWrt luci，prepare.sh 3/6）"
+          check sing-box-tiny         "代理内核（已去掉 QUIC/gVisor）"
+          check kmod-nft-tproxy       "HomeProxy 透明代理"
+          check ucode-mod-digest      "HomeProxy 依赖的 ucode digest"
+          check luci-app-ttyd         "网页终端"
+          check luci-app-filemanager  "文件管理"
           check luci-app-upnp         "UPnP 界面"
           check miniupnpd-nftables    "UPnP 守护进程（nftables 变体）"
           check kmod-nft-fullcone     "FullCone NAT 内核模块（ppe/pkgs）"
@@ -164,8 +164,8 @@ jobs:
             grep -qx "$kv" .config && echo "OK   $kv" || { echo "::error::缺少 $kv"; fail=1; }
           done
 
-          echo "--- 必须不存在的旧栈 ---"
-          for kv in 'CONFIG_PACKAGE_qca-nss-ecm' 'CONFIG_PACKAGE_kmod-shortcut-fe'; do
+          echo "--- 必须不存在的旧栈 / 完整内核 ---"
+          for kv in 'CONFIG_PACKAGE_qca-nss-ecm' 'CONFIG_PACKAGE_kmod-shortcut-fe' 'CONFIG_PACKAGE_sing-box'; do
             if grep -qx "$kv=y" .config; then
               echo "::error::$kv 不应启用（PPE 架构下互斥）"; fail=1
             else
@@ -270,7 +270,7 @@ jobs:
             dropped) echo 'FullCone: 已剔除（fullconenat-nft 源码与 6.18 内核不兼容，见运行日志）' >> ../out/UNVERIFIED.txt ;;
             *)       echo 'FullCone: 含 kmod-nft-fullcone + nftables/firewall4 补丁 + LuCI 页（默认关闭，需在 LuCI 或 uci 里开启）' >> ../out/UNVERIFIED.txt ;;
           esac
-          echo 'OpenClash: 仅界面，clash/mihomo 内核需自行上传' >> ../out/UNVERIFIED.txt
+          echo 'Proxy: HomeProxy + sing-box-tiny（去 QUIC/gVisor），未做真机连通性验证' >> ../out/UNVERIFIED.txt
           ( cd ../out && sha256sum *.ubi *.bin > SHA256SUMS )
           echo "--- 体积 ---"
           ls -lh ../out/

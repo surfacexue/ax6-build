@@ -95,11 +95,12 @@ part_num="$(fw_printenv -n flag_boot_rootfs 2>/dev/null || true)"
 
 | 功能 | 包 | 来源 | 说明 |
 |---|---|---|---|
-| 代理 | `luci-app-openclash` | **ImmortalWrt `luci@openwrt-25.12`**（openwrt 官方 luci 没有） | 只有界面，clash/mihomo 内核不随包发布 |
-| | `luci-compat` `dnsmasq-full` `ruby` `ruby-yaml` `bash` `unzip` `ip-full` `kmod-nft-tproxy` `kmod-inet-diag` | openwrt luci / packages / 内核 | openclash 的硬依赖，缺一个 defconfig 就会静默把 openclash 丢掉 |
+| 代理 | `luci-app-homeproxy` + `sing-box-tiny` | **ImmortalWrt `luci@openwrt-25.12`**（openwrt 官方 luci 没有）+ openwrt packages | 与 Tiny Plus 同一套；内核随包，装完可用 |
+| | `kmod-nft-tproxy` `ucode-mod-digest` | openwrt 内核 / 核心 | HomeProxy 的透明代理与依赖 |
+| 终端 / 文件 | `luci-app-ttyd` `ttyd` `luci-app-filemanager` | openwrt luci / packages | Tiny Plus 同款，无 SCP 客户端也能改配置 |
 | UPnP | `luci-app-upnp` + `miniupnpd-nftables` | openwrt luci / packages | 游戏主机自动端口映射；nftables 变体，和 fw4 同栈 |
 | FullCone | `kmod-nft-fullcone` + `luci-app-fullcone` | **本仓库 `ppe/pkgs/`**（任何 feed 都没有） | 内核模块源码 `fullcone-nat-nftables/nft-fullcone` @`07d93b6` + ImmortalWrt 两份补丁；用户态另有 nftables / libnftnl / firewall4 三个补丁 |
-| 广告过滤 | `luci-app-adblock-fast` + `adblock-fast` | openwrt luci / packages | 走 dnsmasq-full，配 openclash 时可二者择一 |
+| 广告过滤 | `luci-app-adblock-fast` + `adblock-fast` | openwrt luci / packages | adblock-fast 走 dnsmasq，与 HomeProxy 的分流共存 |
 
 没有装 `mosdns` / `v2ray-geodata`：那是分流 DNS 用的，多占约 20 MiB，本机走 PC 端代理用不上。
 
@@ -121,8 +122,8 @@ part_num="$(fw_printenv -n flag_boot_rootfs 2>/dev/null || true)"
 
 ### 刷完后要手动做的两件事
 
-1. **OpenClash 内核**：界面里「配置文件 → 版本更新」下载 mihomo 内核，或本地文件上传。
-   LuCI 装好但没内核时，OpenClash 起不来是正常现象。
+1. **HomeProxy 节点**：LuCI「服务 → HomeProxy」里导入订阅或手填 VLESS Reality / Shadowsocks 节点。
+   内核已随固件装好，不需要另下 sing-box。
 2. **UPnP**：服务默认可能未启用，LuCI「服务 → UPnP」里勾「启用」并指定内网接口。
 
 ### FullCone 的编译风险已做自动化兜底
