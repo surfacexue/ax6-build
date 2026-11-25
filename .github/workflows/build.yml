@@ -319,7 +319,9 @@ jobs:
           warn luci-ssl-openssl
           warn kmod-nf-nathelper
           warn kmod-nf-nathelper-extra
-          warn kmod-nf-nathelper-rtsp
+          # kmod-nf-nathelper-rtsp 不在此列：qosmio 的 netfilter.mk 只有 nf-nathelper（ftp）
+          # 与 nf-nathelper-extra，全树无 rtsp 变体，检查它只会每轮报一次假警告。
+          # （ax6.config 里那行残留已改成注释。）
           # kmod-nft-fullcone / luci-app-turboacc 已从 ax6.config 移除（主线无该 kmod，
           # turboacc 的 NFT_FULLCONE 选项会硬依赖它），不再作为预期项检查。
           warn luci-app-wol
