@@ -213,16 +213,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           log="$RUNNER_TEMP/build.log"
-          [ -f "$log" ] || printf '(no build.log)
-' > "$log"
+          if [ ! -f "$log" ]; then echo "no build.log" > "$log"; fi
           {
-            echo 'Log of the failed build:'
+            echo "Log of the failed build:"
             echo
-            echo '```'
+            echo "```"
             tail -n 300 "$log"
-            echo '```'
+            echo "```"
           } > "$RUNNER_TEMP/fail-notes.md"
-          gh release create "log-${{ github.run_number }}"             --target "$GITHUB_SHA" --prerelease             --title "build log ${{ github.run_number }}"             --notes-file "$RUNNER_TEMP/fail-notes.md" || true
+          gh release create "log-${{ github.run_number }}" --target "$GITHUB_SHA" --prerelease --title "build log ${{ github.run_number }}" --notes-file "$RUNNER_TEMP/fail-notes.md" || true
 
       - name: Collect release assets
         if: steps.build.outputs.skip != 'true'
