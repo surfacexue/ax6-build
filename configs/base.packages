@@ -1,0 +1,19 @@
+# Packages every profile gets. A profile can leave one out with "-name".
+#
+# Firmware updates from this repository's GitHub releases (feeds/ra81/):
+# System -> Firmware Update in LuCI, or "ra81-ota" on the command line.
+# To build without them, put these two lines in your profile:
+#   -luci-app-ra81-ota
+#   -ra81-ota
+ra81-ota
+luci-app-ra81-ota
+
+# LuCI theme: Footstrap (official LuCI theme), made the default once on
+# routers still on Bootstrap (overlays/common/etc/uci-defaults/99-default-theme).
+# To build without it: "-luci-theme-footstrap" in your profile.
+luci-theme-footstrap
+
+# Status page: LuCI's Dashboard (router, resources, live traffic, LAN devices,
+# Wi-Fi clients), LuCI's landing page. To build without it:
+# "-luci-mod-dashboard" in your profile.
+luci-mod-dashboard

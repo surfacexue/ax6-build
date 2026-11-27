@@ -1,0 +1,382 @@
+name: Build firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      profiles:
+        description: "Profiles to build (space-separated names from profiles/)"
+        type: string
+        default: "default mesh"
+      upstream:
+        description: "Upstream tree: the pinned release, or the newest upstream release"
+        type: choice
+        options: [pinned, latest]
+        default: pinned
+      publish:
+        description: "Publish as a release on this channel"
+        type: choice
+        options: [testing, stable, none]
+        default: testing
+  push:
+    branches:
+      - ra81-nss
+  schedule:
+    # Daily: build and publish to "testing" when upstream has a new release, or
+    # this repository has commits since the newest release.
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  # Fixed for the ra81-nss branch: one profile, the pinned upstream (the
+  # patches in patches/ are written against it), publish as a prerelease.
+  PROFILES: default
+  UPSTREAM: pinned
+  PUBLISH: testing
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      changed: ${{ steps.bump.outputs.changed }}
+      commits: ${{ steps.commits.outputs.count }}
+      pins: ${{ steps.plan.outputs.pins }}
+      release: ${{ steps.bump.outputs.release }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          # the whole history, to compare with the newest release's tag
+          fetch-depth: 0
+
+      - name: Validate inputs
+        run: |
+          for p in $PROFILES; do
+            case "$p" in *[!A-Za-z0-9._-]*) echo "::error::bad profile name: $p"; exit 1 ;; esac
+            [ -f "profiles/$p.packages" ] || { echo "::error::no profiles/$p.packages"; exit 1; }
+          done
+
+      - name: Look for a new upstream release
+        id: bump
+        if: env.UPSTREAM == 'latest'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          scripts/bump-upstream.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Look for commits since the newest release
+        id: commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The bot's own commits only record the pins of a release already built
+          prev=$(gh release list --limit 1 --exclude-drafts --json tagName --jq '.[0].tagName // empty')
+          if [ -n "$prev" ] && git rev-parse -q --verify "refs/tags/$prev" >/dev/null; then
+            n=$(git log --format=%an "$prev..HEAD" | grep -cvxF 'github-actions[bot]' || true)
+          else
+            n=1
+          fi
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          echo "Commits since ${prev:-the first release}: $n" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Decide
+        id: plan
+        env:
+          CHANGED: ${{ steps.bump.outputs.changed }}
+          COMMITS: ${{ steps.commits.outputs.count }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The pins this run builds with, to recognise an upstream that is
+          # already known not to build (see "Report a held-back upstream")
+          pins=$(cat upstream/* | sha256sum | cut -c1-12)
+          echo "pins=$pins" >> "$GITHUB_OUTPUT"
+          known=
+          if [ "$CHANGED" = true ]; then
+            known=$(gh issue list --state open --label upstream-held --search "$pins in:body" \
+              --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          fi
+          # A scheduled run (at most one a day) only builds when upstream moved
+          # or this repository has new commits
+          if [ "${{ github.event_name }}" = schedule ] && [ "$CHANGED" != true ] && [ "$COMMITS" = 0 ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing new upstream or here; not building." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ github.event_name }}" = schedule ] && [ -n "$known" ] && [ "$COMMITS" = 0 ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "This upstream is known not to build (issue #$known) and nothing is new here; not building." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=ra81-nss-$(date -u +%Y.%m.%d)-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the pins to the build
+        if: steps.plan.outputs.build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-pins
+          path: upstream/
+          retention-days: 7
+
+  build:
+    name: Build
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+      issues: write
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Free disk space
+        run: |
+          # A full build needs about 26 GB (build_dir, dl, staging_dir, toolchain).
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h / | tail -1
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bzip2 g++ gawk gcc git libncurses-dev make rsync file unzip wget zstd \
+            python3-venv device-tree-compiler squashfs-tools binutils
+
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Use the planned pins
+        uses: actions/download-artifact@v4
+        with:
+          name: upstream-pins
+          path: upstream/
+
+      - name: Restore download cache
+        uses: actions/cache@v4
+        with:
+          path: build/dl
+          key: dl-${{ hashFiles('upstream/*', 'configs/*', 'profiles/*') }}-${{ github.run_id }}
+          restore-keys: |
+            dl-${{ hashFiles('upstream/*', 'configs/*', 'profiles/*') }}-
+            dl-
+
+      - name: Build
+        id: build
+        env:
+          CHANGED: ${{ needs.plan.outputs.changed }}
+          COMMITS: ${{ needs.plan.outputs.commits }}
+          # recorded in the images' /etc/ra81-nss/build-info for the updater
+          OTA_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ env.PUBLISH != 'none' && needs.plan.outputs.tag || '' }}
+        run: |
+          args=()
+          for p in $PROFILES; do args+=(--profile "$p"); done
+          set +e
+          scripts/build.sh -j "$(nproc)" "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          [ "$status" != 0 ] || exit 0
+          # A failure with the pins this repository has built before is ours
+          [ "$CHANGED" = true ] || exit "$status"
+
+          # The newer upstream does not build with this repository. Hold it
+          # back: build the pinned one, so the commits here still ship, and
+          # report it (next step). A later upstream release is tried as usual.
+          echo "held=true" >> "$GITHUB_OUTPUT"
+          tail -n 80 "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/held.log"
+          echo "::warning::The newer upstream does not build with this repository; holding it back"
+          git checkout HEAD -- upstream/ patches/
+          if [ "$COMMITS" = 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream held back and nothing new here: not publishing." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Upstream held back: building the pinned upstream for the commits here." >> "$GITHUB_STEP_SUMMARY"
+          rm -rf build/openwrt build/extra out
+          scripts/build.sh -j "$(nproc)" "${args[@]}"
+
+      - name: Collect release assets
+        if: steps.build.outputs.skip != 'true'
+        run: |
+          mkdir -p release
+          for p in $PROFILES; do
+            for f in out/"$p"/*xiaomi_redmi-ax3000*; do
+              name=$(basename "$f")
+              cp "$f" "release/${name/xiaomi_redmi-ax3000/xiaomi_redmi-ax3000-$p}"
+            done
+            cp "out/$p/config.full" "release/config-$p.txt"
+            cp "out/$p/versions.json" "release/versions-$p.json"
+          done
+          (cd release && sha256sum -- * | sort -k2) > sha256sums
+          mv sha256sums release/
+          cat release/sha256sums
+
+      - name: Sign checksums
+        if: steps.build.outputs.skip != 'true'
+        env:
+          USIGN_SECRET_KEY: ${{ secrets.USIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$USIGN_SECRET_KEY" ]; then
+            echo "::warning::USIGN_SECRET_KEY is not set; the release will not be signed"
+            exit 0
+          fi
+          umask 077
+          # Accept the whole key file or just its base64 line; usign
+          # always skips the first line as a comment.
+          key=$(printf '%s\n' "$USIGN_SECRET_KEY" | tr -d '\r' | grep -v '^untrusted comment:' | tr -d ' \n')
+          printf 'untrusted comment: release key\n%s\n' "$key" > "$RUNNER_TEMP/release.sec"
+          build/openwrt/staging_dir/host/bin/usign -S -m release/sha256sums -s "$RUNNER_TEMP/release.sec"
+          rm -f "$RUNNER_TEMP/release.sec"
+          build/openwrt/staging_dir/host/bin/usign -V -m release/sha256sums -p keys/release.pub
+
+      - name: Upload images
+        if: steps.build.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ra81-nss-${{ github.sha }}
+          path: release/
+          if-no-files-found: error
+
+      - name: Create release
+        if: env.PUBLISH != 'none' && steps.build.outputs.skip != 'true'
+        env:
+          HELD: ${{ steps.build.outputs.held }}
+          HELD_RELEASE: ${{ needs.plan.outputs.release }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          . upstream/openwrt.conf
+          repo=${OPENWRT_URL#https://github.com/}; repo=${repo%.git}
+          {
+            echo "OpenWrt with NSS offload for the Xiaomi Redmi AX3000 (**RA81 only**), built from ${GITHUB_SHA::7}."
+            echo
+            echo "- Channel: **$PUBLISH**"
+            echo "- Upstream: [\`$OPENWRT_RELEASE\`](https://github.com/$repo/releases/tag/$OPENWRT_RELEASE) (\`${OPENWRT_COMMIT::12}\`)"
+            echo "- Profiles: $PROFILES (see \`profiles/\`)"
+            if [ "$HELD" = true ]; then
+              echo "- Held back: the newer upstream (${HELD_RELEASE}) does not build with this repository yet; see the open \`upstream-held\` issue."
+            fi
+            echo
+            # What changed since the newest earlier release (its versions-<profile>.json)
+            prev=$(gh release list --limit 30 --exclude-drafts --json tagName --jq '.[].tagName' | grep -vxF "$TAG" | head -n1 || true)
+            sources=()
+            for p in $PROFILES; do
+              if [ -n "$prev" ]; then
+                gh release download "$prev" -p "versions-$p.json" -D prev 2>/dev/null || true
+              fi
+              [ -s "prev/versions-$p.json" ] || continue
+              python3 -I scripts/versions.py notes "release/versions-$p.json" "prev/versions-$p.json" "$prev" \
+                --profile "$p" "${sources[@]}" configs/base.packages "profiles/$p.packages" ||
+                echo "(Could not compare profile $p with $prev.)"
+              sources=(--no-sources)
+            done
+            if [ ${#sources[@]} -eq 0 ]; then
+              echo "No earlier release with version information to compare with."
+              echo
+            fi
+            echo "| File | Use |"
+            echo "|---|---|"
+            echo "| \`*-<profile>-squashfs-sysupgrade.bin\` | upgrade a router already running this firmware (LuCI *System → Firmware Update*, or \`sysupgrade\`) |"
+            echo "| \`*-<profile>-squashfs-factory.ubi\` | first install into a dual-boot slot (see the README) |"
+            echo "| \`*-<profile>-initramfs-uImage.itb\` | RAM boot via U-Boot TFTP (UART) |"
+            echo
+            if [ -f release/sha256sums.sig ]; then
+              echo "\`sha256sums\` is signed with the key in \`keys/release.pub\` (\`usign -V -m sha256sums -p release.pub\`)."
+            else
+              echo "This release is **not signed**."
+            fi
+            echo
+            echo "Experimental firmware - read the README (install, recovery, limitations) before flashing."
+            echo
+            echo '```'
+            cat release/sha256sums
+            echo '```'
+          } > notes.md
+          channel=(--prerelease)
+          [ "$PUBLISH" = stable ] && channel=(--latest)
+          gh release create "$TAG" release/* \
+            --target "$GITHUB_SHA" \
+            --title "RA81 NSS $TAG" \
+            "${channel[@]}" \
+            --notes-file notes.md
+
+      - name: Record the new pins
+        if: needs.plan.outputs.changed == 'true' && steps.build.outputs.held != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . upstream/openwrt.conf
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add upstream/ patches/
+          merged=
+          git diff --cached --quiet -- patches/ ||
+            merged="The patches in patches/ did not apply as they were and were merged three-way onto the new upstream."
+          git commit -m "upstream: $OPENWRT_RELEASE" -m "Built and published as $TAG." ${merged:+-m "$merged"}
+          for i in 1 2 3; do
+            if git pull --rebase -q origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::could not push the new pins"; exit 1
+
+      - name: Close superseded held-back issues
+        # Whenever a release is built with the pinned upstream - pins moved
+        # by this workflow or by hand - an upstream held back at or before
+        # that release is superseded.
+        if: steps.build.outcome == 'success' && steps.build.outputs.held != 'true' && steps.build.outputs.skip != 'true' && env.PUBLISH != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . upstream/openwrt.conf
+          gh issue list --state open --label upstream-held --json number,title \
+            --jq '.[] | "\(.number) \(.title | sub("^Upstream held back: "; ""))"' |
+          while read -r n rel; do
+            # Release names are <prefix><yyyy.mm.dd>, so they sort as text
+            [ "$rel" \> "$OPENWRT_RELEASE" ] && continue
+            gh issue close "$n" --comment "Superseded: $TAG was built with $OPENWRT_RELEASE." || true
+          done
+
+      - name: Report a held-back upstream
+        if: always() && steps.build.outputs.held == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINS: ${{ needs.plan.outputs.pins }}
+          HELD_RELEASE: ${{ needs.plan.outputs.release }}
+        run: |
+          gh label create upstream-held --color d93f0b --force \
+            --description "A newer upstream that does not build with this repository" >/dev/null
+          {
+            echo "The scheduled build could not use the newer upstream (${HELD_RELEASE}); it was held back and the pinned upstream kept."
+            echo
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Pins: \`$PINS\` (the same upstream is not tried again by a scheduled run while this issue is open)"
+            echo
+            echo "Fix: move the pins with \`scripts/bump-upstream.sh\`, rebase \`patches/\` onto the new tree, and push; the next build closes this issue."
+            echo
+            echo "<details><summary>End of the build log</summary>"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/held.log"
+            echo '```'
+            echo "</details>"
+          } > held.md
+          n=$(gh issue list --state open --label upstream-held --search "$PINS in:body" --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body-file held.md
+          else
+            gh issue create --title "Upstream held back: ${HELD_RELEASE}" --label upstream-held --body-file held.md
+          fi
