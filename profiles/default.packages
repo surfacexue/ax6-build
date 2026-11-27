@@ -5,4 +5,13 @@
 # listed package does not end up in the image (unknown name, missing feed,
 # unmet dependency), so an upgrade never drops software silently.
 #
-# The default profile adds nothing.
+# The default profile adds no package. It does leave two out: this build uses
+# the single-slot layout, and the firmware updater needs two.
+#
+# ra81-ota flashes "the slot that is not running" and arms a trial boot through
+# /lib/functions/xiaomi-dualboot.sh + flag_* - none of which exist without a
+# second slot. Built in, it would either fail on every install or write to a
+# rootfs_1 partition that is not there. Upgrade with sysupgrade or the U-Boot
+# web page instead (README, "Installing").
+-ra81-ota
+-luci-app-ra81-ota

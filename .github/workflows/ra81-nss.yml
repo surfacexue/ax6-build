@@ -351,7 +351,7 @@ jobs:
             echo "| File | Use |"
             echo "|---|---|"
             echo "| \`*-<profile>-squashfs-sysupgrade.bin\` | upgrade a router already running this firmware (LuCI *System → Firmware Update*, or \`sysupgrade\`) |"
-            echo "| \`*-<profile>-squashfs-factory.ubi\` | first install into a dual-boot slot (see the README) |"
+            echo "| \`*-<profile>-squashfs-factory.ubi\` | first install from the U-Boot web page (see the README) |"
             echo "| \`*-<profile>-initramfs-uImage.itb\` | RAM boot via U-Boot TFTP (UART) |"
             echo
             if [ -f release/sha256sums.sig ]; then

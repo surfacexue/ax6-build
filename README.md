@@ -25,8 +25,8 @@ Actions (or locally) that can update themselves from its releases. The NSS work 
 | Area | State |
 |---|---|
 | Boot from the stock Xiaomi U-Boot (bootloader untouched) | ✅ |
-| A/B dual boot: `sysupgrade` writes the other slot, unconfirmed boots roll back by themselves | ✅ tested on hardware |
-| Firmware updates from LuCI: signed releases, trial boot with keep / roll back | ✅ tested on hardware |
+| A/B dual boot: `sysupgrade` writes the other slot, unconfirmed boots roll back by themselves | ➖ not in this build: it uses the **single-slot** fixed-partitions layout (see [How booting works](#how-booting-works)) |
+| Firmware updates from LuCI: signed releases, trial boot with keep / roll back | ➖ needs two slots: `ra81-ota` is left out of this build, flash from the U-Boot web page instead |
 | NSS wired plane + ECM (`dsa` topology, QCA8337 on CPU port 6) | ✅ |
 | Wi-Fi 2.4 GHz and 5 GHz (up to 160 MHz) on the NSS data path | ✅ |
 | Temperature sensors (4 zones, upstream trip points) | ✅ |
@@ -67,9 +67,14 @@ With NSS the router is no longer the limit: ~900 Mbit/s is about what a single
   CR8806 in the upstream tree (same IPQ5000 + QCN6102 + QCA8337, 256 MiB), with
   the RA81 specifics from [lutvzn/RA81OpenWRT](https://github.com/lutvzn/RA81OpenWRT):
   QCA8337 CPU port 6 over SGMII (as the vendor firmware wires it), 4 MiB TZ
-  region, the RA81 Wi-Fi board data, factory MACs from `0:art`, and the Xiaomi
-  dual-boot A/B upgrade with rollback. The NSS bring-up debug options of the
-  upstream tree (serial SysRq, unrestricted `/dev/mem`) are dropped.
+  region, the RA81 Wi-Fi board data, and factory MACs from `0:art`. The layout
+  is the **single-slot** one: the third-party QCA U-Boot on these units
+  publishes no SMEM partition table and keeps no `flag_*` environment, so the
+  DTS writes 19 `fixed-partitions` and `sysupgrade` writes the one `rootfs` UBI
+  volume set in place. The dual-boot A/B helpers of RA81OpenWRT are therefore
+  **not** included (they look for `rootfs_1`, which does not exist here). The
+  NSS bring-up debug options of the upstream tree (serial SysRq, unrestricted
+  `/dev/mem`) are dropped.
 - **Temperature sensors** (`patches/0002`): enabled. The driver now enables
   TSENS itself on IPQ5018; on the RA81 it reads 48-53 °C from idle to full load
   with no bogus values (measured first with the critical trips disabled).
@@ -77,9 +82,11 @@ With NSS the router is no longer the limit: ~900 Mbit/s is about what a single
   tree, and `vm.min_free_kbytes` 8 MiB instead of OpenWrt's 16 MiB
   (`overlays/common`; ~20 MiB more MemAvailable, no allocation failures under
   load).
-- **Firmware updates** (`feeds/ra81/`, `patches/0003`): *System → Firmware
-  Update* in LuCI installs this repository's signed releases into the other
-  slot, on trial (see [Firmware updates](#firmware-updates)). Optional.
+- **Firmware updates** (`feeds/ra81/`): *System → Firmware Update* in LuCI
+  installs this repository's signed releases into the other slot, on trial.
+  It needs two slots and the `flag_*` environment, so it is **left out of the
+  single-slot build** (`profiles/default.packages` removes `ra81-ota` and
+  `luci-app-ra81-ota`); the sources stay in the tree for a dual-boot build.
 - **Package profiles, checked builds and signed releases** (below).
 
 ## Images
@@ -88,8 +95,8 @@ Every release (and every local build) has one set of images per profile:
 
 | File | Use |
 |---|---|
-| `*-squashfs-factory.ubi` | first install into a dual-boot slot |
-| `*-squashfs-sysupgrade.bin` | upgrade a router already running this firmware |
+| `*-squashfs-factory.ubi` | first install, from the U-Boot web page |
+| `*-squashfs-sysupgrade.bin` | upgrade a router already running this firmware, in place (one slot, no rollback) |
 | `*-initramfs-uImage.itb` | RAM boot from U-Boot over TFTP (needs UART) |
 
 Profiles in this repository: `default` (the base image) and `mesh` (full
@@ -102,23 +109,24 @@ access point, see `overlays/examples/access-point`.
 
 ## How booting works
 
-The stock U-Boot (`bootmiwifi`) boots the `kernel` UBI volume from one of two
-36 MiB partitions, `rootfs` (slot 0) or `rootfs_1` (slot 1), chosen by `flag_*`
-variables in its environment:
+This build uses the **single-slot** layout. The NAND carries 19
+`fixed-partitions`, written out in the device tree from the partition table the
+vendor firmware uses; the last one is `rootfs` (116.5 MiB), an UBI container
+with three volumes: `kernel`, `rootfs`, `rootfs_data`.
 
-- Installs and upgrades always write **the slot that is not running** and set
-  `flag_ota_reboot=1`: U-Boot tries the new slot once.
-- Early in boot (preinit, before Wi-Fi) the new system sets
-  `flag_boot_success=0`; at the end of boot it confirms the slot - unless
-  `/var/run/xiaomi-dualboot.hold` exists, which the firmware updater uses to
-  keep a new firmware on trial until it is accepted.
-- If the new system never confirms - it hangs or crashes after preinit, or
-  is simply rebooted before that - the next boot goes back to the old slot.
-- Switch slots by hand: `fw_setenv flag_last_success <0|1>; fw_setenv flag_ota_reboot 0; reboot`.
-
-A kernel that hangs *before* preinit is retried by U-Boot; that needs the
-recovery below. The slot logic was taken from a disassembly of the RA81
-U-Boot by the RA81OpenWRT project.
+- The third-party QCA U-Boot that ships on these units passes
+  `ubi.mtd=rootfs`; the device tree only appends `root=/dev/ubiblock0_1
+  swiotlb=1 coherent_pool=512K` and leaves the rest of the command line alone.
+- Installs go through the U-Boot web page (`http://192.168.10.1`, hold Reset
+  while powering on) with `*-squashfs-factory.ubi`.
+- `sysupgrade` writes that same `rootfs` container in place
+  (`CI_UBIPART=rootfs`, `nand_do_upgrade`). There is no second slot and no
+  `flag_*` environment to fall back to: a bad upgrade needs the U-Boot web
+  page, so keep the factory image at hand.
+- The A/B dual boot described in
+  [lutvzn/RA81OpenWRT](https://github.com/lutvzn/RA81OpenWRT) needs U-Boot that
+  publishes the SMEM partition table; that is not the bootloader here, which is
+  why the `xiaomi-dualboot` helpers are not built.
 
 ## Installing
 
@@ -130,43 +138,39 @@ ssh root@<router> cat /proc/mtd
 for i in $(seq 0 21); do ssh root@<router> "cat /dev/mtd$i" > mtd$i.bin; done
 ```
 
-### From OpenWrt for the RA81 (this firmware, RA81OpenWRT)
+### First install: from the U-Boot web page
+
+There is one `rootfs` partition and no second slot, so the first install does
+not go through a running system: U-Boot reformats that partition.
+
+1. Set the PC wired to a LAN port to `192.168.10.2/24`.
+2. Power off, hold **Reset** (not Mesh) for 10-15 s, power on.
+3. Open `http://192.168.10.1`, upload `*-squashfs-factory.ubi`, wait for the
+   write to finish - do not power off. The router comes up on `192.168.1.1`.
+
+The same page recovers a router whose firmware no longer boots, which is why
+this layout has no A/B rollback: **the U-Boot web page is the fallback.** Keep
+the factory image and the release's `sha256sums` at hand.
+
+A unit still running the stock Xiaomi bootloader (no `/firmware.cgi` on
+`192.168.10.1`) has to be brought to this bootloader first; that is outside this
+repository - see [lutvzn/RA81OpenWRT](https://github.com/lutvzn/RA81OpenWRT).
+
+### From a running RA81 OpenWrt
+
+`ubiformat` cannot write the partition the running system boots from, so use
+`sysupgrade`, which writes that same `rootfs` container in place:
 
 ```sh
-cat *-squashfs-factory.ubi | ssh root@<router> 'cat > /tmp/f.ubi'
-cat scripts/ra81-install-slot.sh | ssh root@<router> 'cat > /tmp/ra81-install-slot.sh'
-ssh root@<router> sh /tmp/ra81-install-slot.sh /tmp/f.ubi <sha256>          # dry run
-ssh root@<router> sh /tmp/ra81-install-slot.sh --yes --reboot /tmp/f.ubi <sha256>
+cd /tmp
+# download the sysupgrade.bin and sha256sums of a release, then:
+sha256sum -c sha256sums 2>/dev/null | grep sysupgrade   # checksum of the image
+sysupgrade -n <file>-squashfs-sysupgrade.bin
 ```
 
-The script checks the model and the running slot, writes only the other slot,
-verifies the UBI volumes and arms a one-time trial boot.
-
-### From the stock Xiaomi firmware
-
-Get a root shell first, e.g. with
-[XMiR-Patcher](https://github.com/openwrt-xiaomi/xmir-patcher) (it sets the
-root password to `root`; the stock `dropbear` needs
-`-o HostKeyAlgorithms=+ssh-rsa`). The stock firmware has `ubiformat` and
-`nvram` but no `fw_setenv`, so the slot is written by hand:
-
-```sh
-cat /proc/cmdline | grep -o 'ubi.mtd=[^ ]*'  # running slot: rootfs = 0, rootfs_1 = 1
-cat /proc/mtd                                # find the OTHER slot's mtd number
-# copy the factory.ubi to /tmp/f.ubi, compare md5sum with the original, then:
-ubiformat /dev/mtdN -f /tmp/f.ubi -y         # N = the slot that is NOT running
-nvram set flag_try_sys1_failed=0
-nvram set flag_try_sys2_failed=0
-nvram set flag_last_success=<running slot>
-nvram unset flag_boot_success
-nvram set flag_ota_reboot=1
-nvram commit
-reboot
-```
-
-This path was tested from stock 1.0.68 with the non-NSS RA81OpenWRT image,
-which was then upgraded to this firmware with `ra81-install-slot.sh`. The stock
-firmware stays in the other slot until the next upgrade overwrites it.
+Use `-n` for the first flash from another firmware so no stale `/etc/config`
+(PPPoE, LAN address, DHCP) comes along; from this firmware on, keep your
+settings and drop `-n`.
 
 ## Upgrading
 
@@ -176,13 +180,10 @@ profile ([below](#packages)), so the image you
 upgrade to already contains it. The image records its build in
 `/etc/ra81-nss/build-info`.
 
-- **In LuCI:** *System → Firmware Update* → *Install*
-  (see [Firmware updates](#firmware-updates)).
-- **On the command line:** `ra81-ota check`, then `ra81-ota upgrade`.
-- **By hand**, e.g. with an image built without the updater: use the
-  `*-<profile>-squashfs-sysupgrade.bin` of the profile you run, in LuCI's
-  *System → Backup / Flash Firmware* (compare the SHA256 it shows with the
-  release's `sha256sums`), or:
+- **In LuCI:** *System → Backup / Flash Firmware* → *Flash image*, with the
+  `*-<profile>-squashfs-sysupgrade.bin` of the profile you run (compare the
+  SHA256 it shows with the release's `sha256sums`).
+- **On the command line:**
 
   ```sh
   cd /tmp
@@ -192,10 +193,17 @@ upgrade to already contains it. The image records its build in
   sysupgrade <file>-squashfs-sysupgrade.bin
   ```
 
-  A manual upgrade is confirmed as soon as it finishes booting: it only rolls
-  back by itself if it does not get that far.
+  An upgrade overwrites the only system there is. If the new one does not come
+  up, recover through the U-Boot web page with the factory image - there is no
+  rollback slot.
 
 ## Firmware updates
+
+> **Not built into this image.** Everything in this section needs two slots and
+> the `flag_*` U-Boot environment; the single-slot build leaves `ra81-ota` and
+> `luci-app-ra81-ota` out (`profiles/default.packages`). The sources still build
+> for a dual-boot layout, so the description is kept for reference: upgrade this
+> build with `sysupgrade` or the U-Boot web page instead, as shown above.
 
 The images include `ra81-ota` (command line) and `luci-app-ra81-ota`
 (*System → Firmware Update*). They update the router from the GitHub releases
@@ -285,7 +293,7 @@ Every image is built from three layers:
 | Layer | File | Contents |
 |---|---|---|
 | Base | `configs/ra81-nss.config` | OpenWrt with LuCI, the NSS offload stack (NSS firmware and drivers, ECM, ath11k with NSS offload, PPPoE acceleration) and the RA81 board support |
-| Every profile | `configs/base.packages` | `ra81-ota`, `luci-app-ra81-ota` (the [firmware updater](#firmware-updates)), `luci-mod-dashboard` (LuCI's Dashboard status page, its landing page), `luci-theme-footstrap` (the default LuCI theme: a new install, or a router still on Bootstrap, switches to it once, even when another theme in the image makes itself the default on install; a theme you chose stays) |
+| Every profile | `configs/base.packages` | `ra81-ota`, `luci-app-ra81-ota` (the [firmware updater](#firmware-updates); the single-slot profile leaves both out), `luci-mod-dashboard` (LuCI's Dashboard status page, its landing page), `luci-theme-footstrap` (the default LuCI theme: a new install, or a router still on Bootstrap, switches to it once, even when another theme in the image makes itself the default on install; a theme you chose stays) |
 | One profile | `profiles/<name>.packages` | what that profile adds or leaves out |
 
 The profiles in this repository:
@@ -439,14 +447,15 @@ on the Windows directories WSL adds.
 
 ## Recovery
 
-1. **Other slot:** power-cycle after a failed boot, or switch slots by hand
-   (see *How booting works*).
-2. **Stock TFTP recovery** (the bootloader is never modified): hold reset
-   while powering on until the system LED blinks; U-Boot then fetches a stock
-   firmware image over TFTP. Use Xiaomi's MIWIFIRepairTool or any DHCP + TFTP
-   server.
+1. **U-Boot web page:** power off, hold reset 10-15 s, power on, upload
+   `*-squashfs-factory.ubi` at `http://192.168.10.1`. This is the first-line
+   recovery - there is no second slot to fall back to.
+2. **Stock TFTP recovery** (the bootloader is never modified by the firmware):
+   hold reset while powering on until the system LED blinks; U-Boot then fetches
+   a stock firmware image over TFTP. Use Xiaomi's MIWIFIRepairTool or any
+   DHCP + TFTP server.
 3. **UART** (GPIO 28/29, 115200 8N1): interrupt U-Boot to TFTP-boot the
-   initramfs image or write a slot.
+   initramfs image or write the `rootfs` partition.
 4. **Your flash backup**, for `0:ART` above all.
 
 ## Known limitations
@@ -472,13 +481,13 @@ configs/ra81-nss.config  base build configuration (diffconfig)
 configs/base.packages    packages in every profile (the firmware updater)
 profiles/                package profiles (*.packages)
 feeds/ra81/              this repository's packages: ra81-ota, luci-app-ra81-ota
+                         (not built by the single-slot profile, see above)
 overlays/common/         files in every image (memory tuning, default theme switch)
 overlays/examples/       optional first-boot examples (bridged access point)
 scripts/build.sh         reproducible build of one or more profiles
 scripts/bump-upstream.sh move upstream/ to a release of the upstream tree
 scripts/profile.sh       profile -> .config, and the post-defconfig check
 scripts/router-packages.sh  profile from a running router
-scripts/ra81-install-slot.sh  installer for the inactive slot (runs on the router)
 tools/validate-images.sh static checks of the images
 keys/release.pub         public key the releases are signed with (also in the images)
 .github/workflows/       GitHub Actions build and release
@@ -505,9 +514,9 @@ vendored here except what is listed; the build fetches the rest.
   measured on a CR8806. See the upstream README for the full acknowledgements.
 - **[lutvzn/RA81OpenWRT](https://github.com/lutvzn/RA81OpenWRT)** - RA81
   support for OpenWrt 25.12: the hardware inventory, the analysis of the RA81
-  U-Boot slot logic, the dual-boot scripts (`xiaomi-dualboot`, in patch 0001),
-  the repacked Wi-Fi board data, `scripts/ra81-install-slot.sh` and the
-  original `tools/validate-images.sh`.
+  U-Boot slot logic, the dual-boot scripts (`xiaomi-dualboot`; not used by this
+  single-slot build, see *How booting works*), the repacked Wi-Fi board data and
+  the original `tools/validate-images.sh`.
 - **[hzyitc/openwrt-redmi-ax3000](https://github.com/hzyitc/openwrt-redmi-ax3000)** -
   the original Redmi AX3000 port and the source of the Wi-Fi board data
   payloads.

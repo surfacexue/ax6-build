@@ -95,27 +95,25 @@ unsquashfs -q -d "$WORK/root" "$RVOL" >/dev/null 2>&1
 R=$WORK/root
 for f in lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin lib/firmware/ath11k/QCN6122/hw1.0/board-2.bin \
 	lib/firmware/ath11k/IPQ5018/hw1.0/q6_fw.mdt lib/firmware/qca-nss0-retail.bin \
-	lib/functions/xiaomi-dualboot.sh lib/upgrade/xiaomi-dualboot.sh lib/preinit/81_xiaomi_dualboot \
 	usr/sbin/fw_printenv usr/sbin/fw_setenv etc/sysctl.d/90-ra81-memory.conf etc/ra81-nss/build-info; do
 	check "has /$f" "[ -e '$R/$f' ]"
 done
 for b in IPQ5018 QCN6122; do
 	check "board-2.bin ($b) keyed for the RA81" "grep -aq 'variant=Xiaomi-Redmi-AX3000' '$R/lib/firmware/ath11k/$b/hw1.0/board-2.bin'"
 done
-check "xiaomi-dualboot init enabled" "ls '$R'/etc/rc.d/ | grep -q 'S99xiaomi-dualboot'"
 check "nss service enabled (S19nss)" "ls '$R'/etc/rc.d/ | grep -q '^S19nss$'"
 check "no ath11k autoload (the nss service loads it after the arm)" "! ls '$R'/etc/modules.d/ | grep -q ath11k"
 check "ECM carries the DSA patch" "grep -aq dsa_port_from_netdev '$R'/lib/modules/*/ecm.ko"
 check "no USB kmods" "! ls '$R'/lib/modules/*/ 2>/dev/null | grep -q dwc3"
 check "kmod-ath11k-ahb present" "ls '$R'/lib/modules/*/ | grep -q '^ath11k_ahb.ko'"
-for s in etc/init.d/xiaomi-dualboot lib/functions/xiaomi-dualboot.sh lib/upgrade/xiaomi-dualboot.sh lib/upgrade/platform.sh lib/preinit/81_xiaomi_dualboot; do
-	check "sh -n /$s" "sh -n '$R/$s'"
-done
+check "sh -n /lib/upgrade/platform.sh" "sh -n '$R/lib/upgrade/platform.sh'"
+# Single slot: the dual-boot A/B helpers must not come back. They look for
+# rootfs_1 / flag_* and would write to a partition this layout does not have.
+check "no dual-slot helpers" "! ls '$R'/etc/init.d/xiaomi-dualboot '$R'/lib/functions/xiaomi-dualboot.sh '$R'/lib/preinit/81_xiaomi_dualboot '$R'/lib/upgrade/xiaomi-dualboot.sh 2>/dev/null | grep -q ."
 
-check "dual-boot confirmation can be held" "grep -q xiaomi-dualboot.hold '$R/etc/init.d/xiaomi-dualboot'"
 if [ -e "$R/usr/sbin/ra81-ota" ]; then
 	check "sh -n /usr/sbin/ra81-ota" "sh -n '$R/usr/sbin/ra81-ota'"
-	check "ra81-ota init enabled (S98, before the S99 confirmation)" "ls '$R'/etc/rc.d/ | grep -q '^S98ra81-ota$'"
+	check "ra81-ota init enabled (S98)" "ls '$R'/etc/rc.d/ | grep -q '^S98ra81-ota$'"
 	check "LuCI view for ra81-ota" "[ -e '$R/www/luci-static/resources/view/ra81-ota.js' ]"
 	check "release key for ra81-ota" "[ -s '$R/etc/ra81-nss/release.pub' ]"
 	check "ra81-ota what's new: details.uc, components.json, history kept" "[ -s '$R/usr/share/ra81-ota/details.uc' ] && [ -s '$R/etc/ra81-nss/components.json' ] && grep -q '/etc/ra81-ota/' '$R/lib/upgrade/keep.d/ra81-ota'"
