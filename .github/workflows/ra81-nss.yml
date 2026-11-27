@@ -20,10 +20,10 @@ on:
   push:
     branches:
       - ra81-nss
-  schedule:
-    # Daily: build and publish to "testing" when upstream has a new release, or
-    # this repository has commits since the newest release.
-    - cron: "17 5 * * *"
+  # No schedule: a build runs only on a push here or on workflow_dispatch.
+  # Re-add the cron when unattended daily builds are wanted again:
+  #   schedule:
+  #     - cron: "17 5 * * *"
 
 permissions:
   contents: read
