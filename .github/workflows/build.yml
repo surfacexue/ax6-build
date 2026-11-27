@@ -207,6 +207,23 @@ jobs:
           rm -rf build/openwrt build/extra out
           scripts/build.sh -j "$(nproc)" "${args[@]}"
 
+      - name: Publish the build log on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          [ -f "$log" ] || printf '(no build.log)
+' > "$log"
+          {
+            echo 'Log of the failed build:'
+            echo
+            echo '```'
+            tail -n 300 "$log"
+            echo '```'
+          } > "$RUNNER_TEMP/fail-notes.md"
+          gh release create "log-${{ github.run_number }}"             --target "$GITHUB_SHA" --prerelease             --title "build log ${{ github.run_number }}"             --notes-file "$RUNNER_TEMP/fail-notes.md" || true
+
       - name: Collect release assets
         if: steps.build.outputs.skip != 'true'
         run: |
