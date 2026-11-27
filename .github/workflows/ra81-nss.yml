@@ -247,14 +247,30 @@ jobs:
         run: |
           log="$RUNNER_TEMP/build.log"
           [ -s "$log" ] || printf 'build.log is missing or empty\n' > "$log"
+          # One tag per run of THIS workflow: "log-<n>" collides with the AX6
+          # workflow's runs, and the create then silently does nothing.
+          tag="log-ra81-nss-${{ github.run_number }}"
           {
-            echo "Log of the failed build:"
+            echo "run #${{ github.run_number }}, commit $GITHUB_SHA, $(date -u +%FT%TZ)"
             echo
-            echo "```"
+            echo "build.log: $(wc -l < "$log") lines, $(wc -c < "$log") bytes"
+            echo
+            echo "## Error lines"
+            echo '```'
+            grep -n -E '(\*\*\* \[|Error [0-9]|error:|ERROR:)' "$log" | tail -n 60 || true
+            echo '```'
+            echo
+            echo "## Last 300 lines"
+            echo '```'
             tail -n 300 "$log"
-            echo "```"
+            echo '```'
           } > "$RUNNER_TEMP/fail-notes.md"
-          gh release create "log-${{ github.run_number }}" --target "$GITHUB_SHA" --prerelease --title "build log ${{ github.run_number }}" --notes-file "$RUNNER_TEMP/fail-notes.md" || true
+          gzip -c "$log" > "$RUNNER_TEMP/build.log.gz"
+          gh release create "$tag" --target "$GITHUB_SHA" --prerelease \
+            --title "ra81-nss build log #${{ github.run_number }}" \
+            --notes-file "$RUNNER_TEMP/fail-notes.md" || \
+            gh release edit "$tag" --notes-file "$RUNNER_TEMP/fail-notes.md" || true
+          gh release upload "$tag" "$RUNNER_TEMP/build.log.gz" --clobber || true
 
       - name: Collect release assets
         if: steps.build.outputs.skip != 'true'
