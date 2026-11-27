@@ -213,7 +213,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           log="$RUNNER_TEMP/build.log"
-          if [ ! -f "$log" ]; then echo "no build.log" > "$log"; fi
+          [ -s "$log" ] || printf 'build.log is missing or empty\n' > "$log"
           {
             echo "Log of the failed build:"
             echo
