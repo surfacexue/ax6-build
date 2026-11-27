@@ -29,9 +29,10 @@ for f in "$FACTORY" "$SYSUPG" "$INITRD"; do
 done
 [ -s "$FACTORY" ] || exit 1
 
-SLOT=$((0x2400000))
+# One slot: the fixed "rootfs" partition (0xA80000 + 0x7480000 in the DTS)
+SLOT=$((0x7480000))
 fsize=$(stat -c%s "$FACTORY")
-check "factory.ubi ($fsize B) fits a 36 MiB slot" "[ $fsize -le $SLOT ]"
+check "factory.ubi ($fsize B) fits the 116.5 MiB rootfs partition" "[ $fsize -le $SLOT ]"
 check "factory.ubi starts with UBI#" "[ \"\$(head -c4 '$FACTORY')\" = 'UBI#' ]"
 
 echo "== UBI volumes"
@@ -77,7 +78,7 @@ check "model Xiaomi Redmi AX3000" "grep -q 'model = \"Xiaomi Redmi AX3000\"' '$D
 # dtc < 1.8 prints string lists as "a\0b" rather than "a", "b"
 check "compatible xiaomi,redmi-ax3000" "grep -Eq 'compatible = \"xiaomi,redmi-ax3000(\"|\\\\0)' '$D'"
 check "bootargs-append root=/dev/ubiblock0_1" "grep -q 'bootargs-append = \" root=/dev/ubiblock0_1' '$D'"
-check "smem partitions with 0:art node" "grep -q 'label = \"0:art\"' '$D'"
+check "fixed partitions with the 0:ART node" "grep -q 'compatible = \"fixed-partitions\"' '$D' && grep -q 'label = \"0:ART\"' '$D'"
 check "NAND ECC strength 8" "grep -q 'nand-ecc-strength = <0x08>' '$D'"
 check "tz reserved 4 MiB" "grep -A1 'tz@4ac00000' '$D' | grep -q '0x4ac00000 0x00 0x400000'"
 check "wcss/q6 regions 0x4b000000-0x4e000000" "grep -q 'wcss@4b000000' '$D' && grep -q 'q6-region-ipq5018@4c400000' '$D' && grep -q 'q6-region-qcn6122-1@4d200000' '$D' && grep -q 'm3-dump-qcn6122-1@4df00000' '$D'"
@@ -122,7 +123,8 @@ if [ -e "$R/usr/sbin/ra81-ota" ]; then
 		echo "  NOTE no OTA_REPO in build-info: set ra81-ota.main.repo on the router"
 fi
 
-check "default theme switch (uci-defaults/29- and 99-default-theme)" "[ -x '$R/etc/uci-defaults/29-default-theme' ] && [ -x '$R/etc/uci-defaults/99-default-theme' ]"
+# LuCI (ff373d85) ships 30_luci-theme-<name> instead of the old 29-/99-default-theme pair
+check "a theme sets itself up (uci-defaults/30_luci-theme-*)" "ls '$R'/etc/uci-defaults/30_luci-theme-* >/dev/null 2>&1"
 # Package sources must all exist on downloads.openwrt.org (apk update fails otherwise)
 check "package sources: only feeds OpenWrt publishes" "! grep -E '^https?://' '$R/etc/apk/repositories.d/distfeeds.list' | grep -vqE '/(targets/[^/]+/[^/]+/packages|packages/[^/]+/(base|packages|luci|routing|telephony|video))/packages\\.adb\$'"
 
