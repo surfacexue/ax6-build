@@ -138,9 +138,6 @@ jobs:
       issues: write
     env:
       TAG: ${{ needs.plan.outputs.tag }}
-      # ccache keeps the compiled objects; OpenWrt also falls back to <tree>/.ccache,
-      # so both paths are what the cache step below saves
-      CCACHE_DIR: ${{ github.workspace }}/build/ccache
     steps:
       - name: Free disk space
         run: |
@@ -168,9 +165,11 @@ jobs:
 
       - name: Prepare ccache
         run: |
-          mkdir -p build/ccache
-          ccache --max-size=3G
-          ccache -s | sed -n '1,10p'
+          # rules.mk takes CCACHE_DIR from CONFIG_CCACHE_DIR, else <tree>/.ccache
+          d="$GITHUB_WORKSPACE/build/openwrt/.ccache"
+          mkdir -p "$d"
+          CCACHE_DIR="$d" ccache --max-size=3G
+          CCACHE_DIR="$d" ccache -s | sed -n '1,10p'
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -179,9 +178,7 @@ jobs:
           # reuses everything it did not touch. The key carries the run id so
           # every run saves a fresh archive, and restore-keys take the newest
           # one of the same tree.
-          path: |
-            build/ccache
-            build/openwrt/.ccache
+          path: build/openwrt/.ccache
           key: ccache-${{ hashFiles('upstream/*', 'configs/*', 'profiles/*', 'patches/*') }}-${{ github.run_id }}
           restore-keys: |
             ccache-${{ hashFiles('upstream/*', 'configs/*', 'profiles/*', 'patches/*') }}-
@@ -236,9 +233,9 @@ jobs:
       - name: Report ccache stats
         if: always()
         run: |
-          ccache -s || true
-          echo "CCACHE_DIR=$CCACHE_DIR"
-          du -sh "$CCACHE_DIR" build/openwrt/.ccache 2>/dev/null || true
+          d="$GITHUB_WORKSPACE/build/openwrt/.ccache"
+          CCACHE_DIR="$d" ccache -s || true
+          du -sh "$d" 2>/dev/null || true
 
       - name: Publish the build log on failure
         if: failure()

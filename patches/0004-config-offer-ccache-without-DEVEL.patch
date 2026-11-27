@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: surfacexue <surfacexue@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 11:25:00 +0800
+Subject: [PATCH 4/4] config: offer ccache without DEVEL
+
+The ccache prompt is hidden unless DEVEL is enabled, so a diffconfig that
+sets CONFIG_CCACHE=y loses it again in "make defconfig". Show the prompt
+always: ccache changes no image content, only how the build gets there.
+
+CONFIG_AUTOREBUILD (default y, prompt also gated by DEVEL) must not be
+switched on just to reach ccache.
+---
+ config/Config-devel.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/config/Config-devel.in b/config/Config-devel.in
+--- a/config/Config-devel.in
++++ b/config/Config-devel.in
+@@ -133,7 +133,7 @@ menuconfig DEVEL
+ 		  root filesystem directory.
+ 
+ 	config CCACHE
+-		bool "Use ccache" if DEVEL
++		bool "Use ccache"
+ 		help
+ 		  Compiler cache; see https://ccache.samba.org/
+ 
