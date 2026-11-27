@@ -138,6 +138,9 @@ jobs:
       issues: write
     env:
       TAG: ${{ needs.plan.outputs.tag }}
+      # ccache keeps the compiled objects; OpenWrt also falls back to <tree>/.ccache,
+      # so both paths are what the cache step below saves
+      CCACHE_DIR: ${{ github.workspace }}/build/ccache
     steps:
       - name: Free disk space
         run: |
@@ -152,7 +155,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bzip2 g++ gawk gcc git libncurses-dev make rsync file unzip wget zstd \
-            python3-venv device-tree-compiler squashfs-tools binutils
+            python3-venv device-tree-compiler squashfs-tools binutils ccache
 
       - name: Check out
         uses: actions/checkout@v4
@@ -163,11 +166,34 @@ jobs:
           name: upstream-pins
           path: upstream/
 
+      - name: Prepare ccache
+        run: |
+          mkdir -p build/ccache
+          ccache --max-size=3G
+          ccache -s | sed -n '1,10p'
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          # Compiled objects, not downloads: a rebuild after a patch change
+          # reuses everything it did not touch. The key carries the run id so
+          # every run saves a fresh archive, and restore-keys take the newest
+          # one of the same tree.
+          path: |
+            build/ccache
+            build/openwrt/.ccache
+          key: ccache-${{ hashFiles('upstream/*', 'configs/*', 'profiles/*', 'patches/*') }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ hashFiles('upstream/*', 'configs/*', 'profiles/*', 'patches/*') }}-
+            ccache-
+
       - name: Restore download cache
         uses: actions/cache@v4
         with:
+          # The tarballs "make download" fetches. The key has no run id: an entry
+          # that already exists is reused as it is instead of being saved again.
           path: build/dl
-          key: dl-${{ hashFiles('upstream/*', 'configs/*', 'profiles/*') }}-${{ github.run_id }}
+          key: dl-${{ hashFiles('upstream/*', 'configs/*', 'profiles/*') }}
           restore-keys: |
             dl-${{ hashFiles('upstream/*', 'configs/*', 'profiles/*') }}-
             dl-
@@ -206,6 +232,13 @@ jobs:
           echo "Upstream held back: building the pinned upstream for the commits here." >> "$GITHUB_STEP_SUMMARY"
           rm -rf build/openwrt build/extra out
           scripts/build.sh -j "$(nproc)" "${args[@]}"
+
+      - name: Report ccache stats
+        if: always()
+        run: |
+          ccache -s || true
+          echo "CCACHE_DIR=$CCACHE_DIR"
+          du -sh "$CCACHE_DIR" build/openwrt/.ccache 2>/dev/null || true
 
       - name: Publish the build log on failure
         if: failure()
