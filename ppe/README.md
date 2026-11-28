@@ -148,7 +148,18 @@ part_num="$(fw_printenv -n flag_boot_rootfs 2>/dev/null || true)"
 
 ## 怎么跑
 
-Actions → **Build AX6 PPE-NSS Firmware** → Run workflow。两个输入都留空即用默认钉住的 commit。
+两种方式，跑的是同一份工作流、同一套产物：
+
+1. **自动**：push 到 `main`，改动命中 `ppe/**` 或 `.github/workflows/build-ppe.yml` 即触发。
+   两个输入取文件里钉住的默认值（`ppe_sha`=7d65a3e、`tiny_sha`=57e4ff3）。
+2. **手动**：Actions → **Build AX6 PPE-NSS Firmware** → Run workflow。
+   两个输入都留空即用默认钉住的 commit。
+
+> 2026-11-28 起加了 push 触发（带 `paths` 过滤）。此前本线与 LibWrt 线都是纯手动，
+> 只有主线 `build.yml` 挂 push。主线 `paths` 不含 `ppe/**`，两线不会互相误触发。
+> `concurrency` 为 `ax6-ppe-${{ github.ref }}`、`cancel-in-progress: false`：
+> 连续推送时后一轮排队等前一轮跑完，不会把正在编的那轮杀掉。
+> push 触发下 `inputs` 是空串，`env` 里已用 `|| 默认 sha` 兜底，改动时别把 fallback 删掉。
 
 首轮 ccache 与 dl 都空，60–100 分钟。产物在 `out/`：
 

@@ -6,7 +6,11 @@ name: Build AX6 PPE-NSS Firmware
 #   本线 build-ppe.yml  → ppe-nss 6.18 + PPE/EDMA 有线 + NSS WiFi（无 ECM）
 # 两线互斥：ECM 与 PPE 是两套数据面架构，不能同时装。
 #
-# 只允许手动触发，不进 push 路径，避免和主线的 62 分钟编译抢并发。
+# 触发方式（2026-11-28 起）：
+#   1. 手动 workflow_dispatch（可指定 ppe_sha / tiny_sha）
+#   2. push 到 main，且改动命中 ppe/** 或本文件
+# paths 只放 ppe/**，主线 build.yml 的 paths 也不含 ppe/**，两线互不误触发。
+# concurrency 组按 ref 区分：push 与手动同为 refs/heads/main，串行且不互相取消。
 
 on:
   workflow_dispatch:
@@ -19,6 +23,11 @@ on:
         description: 'AX6-OpenWrt-Tiny 仓库 commit（提供 stock 移植脚本）'
         required: false
         default: '57e4ff319099af7683c2d0df1904b55a5a0c193e'
+  push:
+    branches: [main]
+    paths:
+      - 'ppe/**'
+      - '.github/workflows/build-ppe.yml'
 
 permissions:
   contents: read
@@ -33,8 +42,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
-      PPE_SOURCE_SHA: ${{ inputs.ppe_sha }}
-      TINY_SHA: ${{ inputs.tiny_sha }}
+      # push 触发时 inputs 为空串，必须 fallback 到钉住的 commit。
+      # 否则 PPE_SOURCE_SHA 为空，下面 `git checkout "$PPE_SOURCE_SHA"` 与
+      # `[[ HEAD == "$PPE_SOURCE_SHA" ]]` 必然失败。
+      PPE_SOURCE_SHA: ${{ inputs.ppe_sha || '7d65a3ed836a0071e2f19a5944682f457e02efe0' }}
+      TINY_SHA: ${{ inputs.tiny_sha || '57e4ff319099af7683c2d0df1904b55a5a0c193e' }}
       TZ: Asia/Shanghai
 
     steps:

@@ -80,7 +80,7 @@ openwrt-25.12 的 packages feed 自带 `golang1.27`，满足 tailscale 1.104.1 �
 3. **NSS 固件 11.4.0.5-R6 → 12.5-R210**：一个 `CONFIG_NSS_FIRMWARE_VERSION_12_5` 同时切换固件与驱动
    （驱动 Makefile 里只有 11_4 才降级到 2021 源码）。代价是不支持 802.11s mesh
 
-- 触发方式：Actions → **Build AX6 PPE-NSS Firmware** → Run workflow（**只手动触发**）
+- 触发方式：push 到 `main` 且命中 `ppe/**`（自动），或 Actions → **Build AX6 PPE-NSS Firmware** → Run workflow（手动）
 - 配置：`ppe/configs/ax6-ppe-nss.config`
 - 细节、风险与验收：`ppe/README.md`
 
