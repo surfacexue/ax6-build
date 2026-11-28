@@ -228,6 +228,39 @@ jobs:
           find dl -type f -size -1024c -print 2>/dev/null || true
           df -h /
 
+      - name: 预热 host tools + toolchain（所有预编的前置）
+        working-directory: ppe-source
+        run: |
+          # 为什么单独成步并前置：run 46128616885 实测——排在它前面的「FullCone 预编」
+          # 在 host tools 建好之前跑，2 秒就挂在 staging_dir/host/bin/sed 不存在
+          # （package/utils/lua [host] Error 127），然后被 warning 分支吞掉，闸门恒失效。
+          # tools/install + toolchain/install 本来就是完整编译的前半段，提到这里只是改顺序，
+          # 后面的完整 make 直接复用，总时长不变；顺带让「编译固件」那步的耗时读数
+          # 不再混进 30 分钟工具链安装。
+          set -o pipefail
+          LOG=/tmp/preheat.log
+          rc=0
+          echo "===== tools/install ====="
+          make -j"$(nproc)" tools/install 2>&1 | tee "$LOG" || rc=$?
+          if [[ $rc -eq 0 ]]; then
+            echo "===== toolchain/install ====="
+            make -j"$(nproc)" toolchain/install 2>&1 | tee -a "$LOG" || rc=$?
+          fi
+          # 失败诊断 / 上传 artifact / 发布 logs 分支三处只认 /tmp/build.log
+          cp "$LOG" /tmp/build.log || true
+          if [[ $rc -ne 0 ]]; then
+            echo "::error::host tools/toolchain 预热失败（rc=$rc），本轮在预编前中止；日志见 /tmp/build.log"
+            exit $rc
+          fi
+          # 硬断言：后续预编依赖 host 侧的 sed（run 46128137376 就是缺它 → Error 127），
+          # 以及 toolchain 里的交叉 gcc。gcc 不在 host/bin（OpenWrt 用系统 gcc 编 host 包），
+          # 所以按 toolchain-*/bin/*-gcc 查，避免误杀。
+          [ -x staging_dir/host/bin/sed ] || { echo "::error::预热结束但 staging_dir/host/bin/sed 缺失"; exit 1; }
+          ls -d staging_dir/toolchain-* >/dev/null 2>&1 || { echo "::error::预热结束但没有 toolchain 目录"; exit 1; }
+          ls staging_dir/toolchain-*/bin/*-gcc >/dev/null 2>&1 || { echo "::error::toolchain 里找不到交叉 gcc"; exit 1; }
+          command -v awk >/dev/null || { echo "::error::系统里没有 awk"; exit 1; }
+          echo "OK: host tools 与 toolchain 就绪"
+
       - name: 预编 FullCone 链路（早失败 / 自动降级）
         working-directory: ppe-source
         run: |
@@ -243,6 +276,8 @@ jobs:
               echo "::error::剔除 FullCone 失败，配置里仍然启用"; exit 1
             fi
             echo "FULLCONE=dropped" >> "$GITHUB_ENV"
+            # 已降级：本步后续的静态检查与试编译都不再有意义，直接结束本步。
+            exit 0
           }
           # 第一层：静态自检。这一步不依赖工具链，任何时候都能做，也一定能给出结论。
           #   - 三份补丁必须随仓库到齐（prepare.sh 拷进各包的 patches/）
@@ -263,14 +298,15 @@ jobs:
 
           # 第二层：试编译。FullCone 要四件套一起编——libnftnl（表达式库）、nftables（语法）、
           # firewall4（fw4 开关）、内核模块；真正的不兼容只有编过才知道。
-          # 但 package/.../compile 依赖已建好的工具链与 staging_dir：全新 job 跑到这里时
-          # 它们还不存在，make 会立刻失败（run #2 就是这样，1.2 秒失败、还被误报成
-          # "FullCone 预编失败"）。所以先看有没有工具链，没有就明说跳过。
-          if ! ls -d staging_dir/toolchain-* >/dev/null 2>&1; then
-            echo "::notice::工具链尚未构建，跳过试编译；四件套由正式编译验证（静态自检已通过）"
-            echo "FULLCONE=kept" >> "$GITHUB_ENV"
-            exit 0
-          fi
+          # 前置条件必须显式硬校验，不能靠 warning 滑过去。
+          # 「前置条件不满足」与「被测对象不兼容」是两件事，共用一个分支就是闸门失效的根因：
+          # run 46128616885 里 host tools 没建，2 秒 Error 127，却被当成「报错不在 FullCone」
+          # 放行。预热步骤已在本步之前跑完，这里再缺工具只能是步骤顺序被改坏 → 报错。
+          [ -x staging_dir/host/bin/sed ] || {
+            echo "::error::host 工具链不就绪（缺 staging_dir/host/bin/sed），第 14 步无法做有效预编"; exit 1; }
+          ls -d staging_dir/toolchain-* >/dev/null 2>&1 || {
+            echo "::error::toolchain 未构建（staging_dir/toolchain-* 不存在），第 14 步无法做有效预编"; exit 1; }
+          echo "OK: 预编前置条件就绪（host tools + toolchain 均在）"
 
           if make -j"$(nproc)" V=s \
                  package/libs/libnftnl/compile \
@@ -283,11 +319,14 @@ jobs:
           fi
           echo "--- 预编失败，日志末尾 ---"
           tail -40 "$LOG" || true
+          # 白名单式判据：只有明确指向 FullCone 源码 / 补丁的失败才降级。
+          # 其余任何非零退出都是真实错误，必须报错——否则这道闸门永远留着一个后门
+          # （拿到真错误也只会再发一条 warning，等于什么都没做）。
           if grep -qE 'nft_ext_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)|nf_nat_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)|Hunk #[0-9]+ FAILED|patch does not apply' "$LOG"; then
             drop_fullcone "确认 FullCone 源码或补丁与本树不兼容"
           else
-            echo "::warning::预编失败但报错不在 FullCone 自身（见上面日志），保持原配置，由正式编译判定"
-            echo "FULLCONE=kept" >> "$GITHUB_ENV"
+            echo "::error::FullCone 预编失败，且报错不指向 FullCone 源码 —— 按真实错误处理，不降级"
+            exit 1
           fi
 
       - name: 编译固件
@@ -303,21 +342,12 @@ jobs:
           # 而它排在包阶段靠后位置，一失败就要等满 60 分钟。先单独编它：
           # 依赖（toolchain/openssl/libuv）在这一步一并构建，随后完整 make 直接复用，
           # 总时长基本不变，但 lws 出问题能在半小时内暴露。
-          echo "===== 预热：host tools + toolchain（预编 lws 的前提）====="
-          # run 46128137376 实测：直接 make package/.../libwebsockets/compile 会在
-          # 「host lua 编不过」这一步死（staging_dir/host/bin/sed: No such file or directory，
-          # Error 127）——因为 host 工具链还没建。这两步本来就是完整编译的前半段，
-          # 先做只是把顺序提上来，随后完整 make 会直接复用，总时长基本不变。
-          pre=0
-          make -j"$(nproc)" tools/install 2>&1 | tee /tmp/build.log || pre=$?
-          if [[ $pre -eq 0 ]]; then
-            make -j"$(nproc)" toolchain/install 2>&1 | tee -a /tmp/build.log || pre=$?
-          fi
           echo "===== 预编 libwebsockets（早失败）====="
+          # host tools 与 toolchain 已由前置步骤「预热 host tools + toolchain」建好。
           # 日志必须写到 /tmp/build.log：失败诊断、上传日志、logs 分支三处都只认这个文件名。
-          if [[ $pre -eq 0 ]]; then
-            make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee -a /tmp/build.log || pre=$?
-          fi
+          # 这里用追加（-a）：预热步已把 /tmp/preheat.log 复制成 build.log，覆盖会丢掉预热日志。
+          pre=0
+          make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee -a /tmp/build.log || pre=$?
           cp /tmp/build.log /tmp/build-lws.log || true
           if [[ $pre -ne 0 ]]; then
             echo "::error::预热或 lws 预编失败（rc=$pre），本轮在完整编译前中止；完整日志见 /tmp/build.log"
@@ -550,6 +580,17 @@ jobs:
             *)       echo 'FullCone: 含 kmod-nft-fullcone + nftables/firewall4 补丁 + LuCI 页（默认关闭，需在 LuCI 或 uci 里开启）' >> ../out/UNVERIFIED.txt ;;
           esac
           echo 'Proxy: HomeProxy + sing-box-tiny（去 QUIC/gVisor），未做真机连通性验证' >> ../out/UNVERIFIED.txt
+          # 产物白名单：out/ 就是 CI 的 artifact 路径，仓库里任何误提交的文件都会被
+          # 打进固件包发到现场（run 46128616885 就混进了 out/1，一个 18,485 B 的补丁副本）。
+          # 校验只管「该有的在不在」，管不住「多了什么」——所以这里按白名单逐项清。
+          allowed=" AX6-ppe-nss-factory.ubi AX6-ppe-nss-sysupgrade.bin AX6-ppe-nss.manifest build.config required-packages.txt AX6-ppe-nss-IMAGE-AUDIT.md IMAGE-AUDIT.md UNVERIFIED.txt SHA256SUMS MISSING-SOFT.txt "
+          for f in ../out/*; do
+            b=$(basename "$f")
+            case "$allowed" in
+              *" $b "*) ;;
+              *) echo "::warning::out/ 里出现非白名单文件：$b —— 已从产物中删除"; rm -f "$f" ;;
+            esac
+          done
           ( cd ../out && sha256sum *.ubi *.bin > SHA256SUMS )
           echo "--- 体积 ---"
           ls -lh ../out/
@@ -562,7 +603,10 @@ jobs:
           key: ccache-ppe2618-${{ github.run_id }}
 
       - name: 保存 dl 缓存
-        if: always()
+        # key 是内容哈希：恢复命中之后 save 仍会执行，于是每轮都报一条
+        # "Unable to reserve cache with key dl-ppe2618-..., another job may be creating this cache"
+        # （run 46128616885 实测）。功能无损但是纯噪声，看久了没人看。命中就跳过 save。
+        if: always() && steps.dl-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ppe-source/dl
