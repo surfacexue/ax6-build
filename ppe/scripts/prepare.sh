@@ -41,6 +41,32 @@ for entry in themes/luci-theme-argon applications/luci-app-homeproxy; do
     echo "ERROR: 上游 luci 缺少 $entry（上游可能已挪位置）" >&2; exit 1; }
   cp -a "$work/luci/$entry" package/ax6-luci/
 done
+
+# HomeProxy 生成器升级到 sing-box 1.13+ 写法
+#   sing-box 1.13.0 删掉了 inbound 的 sniff / sniff_override_destination 和 dns.independent_cache，
+#   而 25.12 分支的 generate_client.uc 还在写这三个字段 → 1.14.0 直接
+#   FATAL "legacy inbound fields ... removed in sing-box 1.13.0"，服务起不来、tproxy 规则 0 条。
+#   master 分支已改为 route rule `action: 'sniff'`，真机实测 `sing-box check` rc=0。
+#   只换这一个文件：scripts/ 下另外 8 个文件两分支逐字节相同，不必整目录升级
+#   （整包升级会把视图页也拉到 master，依赖更新的 luci 基座，属于无谓风险）。
+hp_gen='package/ax6-luci/luci-app-homeproxy/root/etc/homeproxy/scripts/generate_client.uc'
+[[ -f "$hp_gen" ]] || { echo "ERROR: 找不到 $hp_gen（上游目录结构变了）" >&2; exit 1; }
+if ! grep -q 'sniff_override_destination' "$hp_gen"; then
+  # 上游 25.12 分支若也修了，这里就不该覆盖，否则会把新代码退回旧的
+  echo 'WARN: 25.12 分支的 generate_client.uc 已不含旧字段（上游可能已修），跳过覆盖，请复核' >&2
+else
+  cp ../ppe/pkgs/homeproxy/generate_client.uc "$hp_gen"
+  if ! grep -q "action: 'sniff'" "$hp_gen"; then
+    echo 'ERROR: 替换后的 generate_client.uc 缺少 action: '\''sniff'\''，homeproxy 仍会崩' >&2
+    exit 1
+  fi
+  if grep -q 'sniff_override_destination' "$hp_gen"; then
+    echo 'ERROR: 替换后旧字段仍在，覆盖没生效' >&2
+    exit 1
+  fi
+  echo 'OK: HomeProxy generate_client.uc 已升级为 sing-box 1.13+ 写法（action: sniff）'
+fi
+
 python3 - <<'PY'
 from pathlib import Path
 

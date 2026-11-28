@@ -1,0 +1,24 @@
+generate_client.uc 来源（保持与上游逐字节一致，便于日后直接覆盖更新）
+
+仓库    https://github.com/immortalwrt/luci
+分支    master
+commit  6839c87b4da0e8274ab6c0948e688c26447c1547  (2026-11-28 抓取)
+路径    applications/luci-app-homeproxy/root/etc/homeproxy/scripts/generate_client.uc
+大小    28635 B
+sha256  见同目录 SHA256 文件或构建日志
+
+为什么换这一个文件：
+  sing-box 1.13.0 删除了 inbound 的 sniff / sniff_override_destination
+  和 dns.independent_cache；immortalwrt openwrt-25.12 分支的生成器仍在写这些字段，
+  导致 sing-box 1.14 直接 FATAL（legacy inbound fields），homeproxy 服务起不来、
+  nft tproxy 规则一条都不生成。
+  master 分支已改为 route rule `action: 'sniff'`（源码注释 "leave for sing-box 1.13.0"
+  已生效），实测在 AX6 + sing-box-tiny 1.14.0 上 `sing-box check` rc=0。
+
+为什么只换一个文件：
+  scripts/ 目录下 10 个文件，两分支逐字节相同的 9 个（clean_log.sh、firewall_post.ut、
+  firewall_pre.uc、generate_server.uc、homeproxy.uc、update_crond.sh、update_resources.sh、
+  update_subscriptions.uc 以及……仅 generate_client.uc 与 migrate_config.uc 有差异，
+  后者只做 uci 选项迁移，与本问题无关）。
+  换整包会把视图页一并从 master 拉过来，那些页面的 JS 依赖 master 版 luci 基座，
+  在没有同步升级 feeds/luci 的情况下属于无谓风险。
