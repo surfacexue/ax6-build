@@ -228,7 +228,7 @@ jobs:
           find dl -type f -size -1024c -print 2>/dev/null || true
           df -h /
 
-      - name: 预热 host tools + toolchain（所有预编的前置）
+      - name: 预热 host tools + toolchain（提前暴露工具链问题）
         working-directory: ppe-source
         run: |
           # 为什么单独成步并前置：run 46128616885 实测——排在它前面的「FullCone 预编」
@@ -261,15 +261,23 @@ jobs:
           command -v awk >/dev/null || { echo "::error::系统里没有 awk"; exit 1; }
           echo "OK: host tools 与 toolchain 就绪"
 
-      - name: 预编 FullCone 链路（早失败 / 自动降级）
+      - name: 校验 FullCone 补丁完整性（只查文件，不编译）
         working-directory: ppe-source
         run: |
-          set -o pipefail
-          # 日志必须写进 /tmp/build.log：失败诊断、上传 artifact、发布 logs 分支三处只认这个文件名。
-          # run 46135980452 就栽在这 —— 本步写的是 prebuild-fullcone.log，失败后发布出去的
-          # 只有第 14 步的预热日志（122 行、一个错误行都没有），真实错误只能靠 API 拉 job 日志才看得到。
-          # 用 -a 追加：第 14 步已把 preheat.log 复制成 build.log，覆盖会丢掉预热日志。
-          LOG=/tmp/build.log
+          # 本步只做静态检查，**不跑 make**。
+          #
+          # 为什么砍掉试编译（run 46143867960 实测）：
+          #   package/network/utils/nftables 与 package/network/config/firewall4 的 DEPENDS
+          #   里带 +kmod-nft-*，OpenWrt 编它们之前会先把那一串内核模块编掉；而任何
+          #   package/kernel/* 都依赖 build_dir/<target>/linux-6.18.60/.config，
+          #   该文件只有 target/linux/compile 才会生成。于是「预编三个用户态包」实际
+          #   变成了「预编整棵内核」，必然报
+          #     No rule to make target '.../linux-6.18.60/.config'
+          #   第一次炸在 gpio-button-hotplug（run 46135980452，1m24s），把显式的
+          #   fullconenat-nft/compile 从目标里删掉后照样炸（run 46143867960，1m08s）。
+          #   三次预编失败里两次是这道闸门自己造成的，与 FullCone 兼容性无关 —— 砍掉。
+          #
+          # FullCone 能否编过，交给第 16 步完整编译：那里内核树齐全，且失败有 -j1 串行重试。
           drop_fullcone() {
             echo "::warning::$1 —— 本次构建剔除 FullCone，其余功能照常编译"
             sed -i -e 's|^CONFIG_PACKAGE_kmod-nft-fullcone=y|# CONFIG_PACKAGE_kmod-nft-fullcone is not set|' \
@@ -280,65 +288,26 @@ jobs:
               echo "::error::剔除 FullCone 失败，配置里仍然启用"; exit 1
             fi
             echo "FULLCONE=dropped" >> "$GITHUB_ENV"
-            # 已降级：本步后续的静态检查与试编译都不再有意义，直接结束本步。
             exit 0
           }
-          # 第一层：静态自检。这一步不依赖工具链，任何时候都能做，也一定能给出结论。
-          #   - 三份补丁必须随仓库到齐（prepare.sh 拷进各包的 patches/）
-          #   - 补丁里必须真的带 fullcone 表达式/符号（拷错了包也算不过）
-          #   - firewall4 的 Makefile 必须声明 kmod 依赖
+
+          # 三份补丁必须随仓库到齐（prepare.sh 拷进各包的 patches/）
           for p in package/libs/libnftnl/patches/900-fullcone.patch \
                    package/network/utils/nftables/patches/900-fullcone.patch \
                    package/network/config/firewall4/patches/900-fullcone.patch; do
             [ -s "$p" ] || drop_fullcone "补丁文件缺失或为空：$p"
           done
+          # 补丁里必须真的带 fullcone 表达式/符号（拷错了包也算不过）
           grep -q 'expr/fullcone' package/libs/libnftnl/patches/900-fullcone.patch \
             || drop_fullcone "libnftnl 补丁里没有 fullcone 表达式源文件"
           grep -q 'fullcone' package/network/utils/nftables/patches/900-fullcone.patch \
             || drop_fullcone "nftables 补丁里没有 fullcone 语法"
+          # firewall4 必须声明 kmod 依赖，否则 fw4 的 fullcone 开关没有后端
           grep -q 'kmod-nft-fullcone' package/network/config/firewall4/Makefile \
             || drop_fullcone "firewall4 的 Makefile 没声明 kmod-nft-fullcone 依赖"
-          echo "OK: FullCone 三份补丁到位，符号与依赖齐全"
 
-          # 第二层：试编译。FullCone 要四件套一起编——libnftnl（表达式库）、nftables（语法）、
-          # firewall4（fw4 开关）、内核模块；真正的不兼容只有编过才知道。
-          # 前置条件必须显式硬校验，不能靠 warning 滑过去。
-          # 「前置条件不满足」与「被测对象不兼容」是两件事，共用一个分支就是闸门失效的根因：
-          # run 46128616885 里 host tools 没建，2 秒 Error 127，却被当成「报错不在 FullCone」
-          # 放行。预热步骤已在本步之前跑完，这里再缺工具只能是步骤顺序被改坏 → 报错。
-          [ -x staging_dir/host/bin/sed ] || {
-            echo "::error::host 工具链不就绪（缺 staging_dir/host/bin/sed），第 14 步无法做有效预编"; exit 1; }
-          ls -d staging_dir/toolchain-* >/dev/null 2>&1 || {
-            echo "::error::toolchain 未构建（staging_dir/toolchain-* 不存在），第 14 步无法做有效预编"; exit 1; }
-          echo "OK: 预编前置条件就绪（host tools + toolchain 均在）"
-
-          # 只能预编「用户态」三件套。**不能**把 kmod 放进来：编任何内核模块都要求内核树里
-          # 已存在 linux-6.18.60/.config，而该文件只有 target/linux/compile 会生成 ——
-          # 单独 make package/<kmod>/compile 在 OpenWrt 里必然报
-          #   No rule to make target '.../linux-6.18.60/.config'
-          # 并把整轮带死（run 46135980452 就是这么挂的，1 分 24 秒，报错落在 gpio-button-hotplug）。
-          # 内核模块（kmod-nft-fullcone / nf_nat_fullcone.c）的兼容性交给后面的完整编译验证，
-          # 那里内核树是齐的，而且带 -j1 串行重试兜底。
-          # 用户态这三位已经覆盖了「补丁打不上」「fullcone 表达式编不过」这两类真实的 FullCone 不兼容。
-          if make -j"$(nproc)" V=s \
-                 package/libs/libnftnl/compile \
-                 package/network/utils/nftables/compile \
-                 package/network/config/firewall4/compile 2>&1 | tee -a "$LOG"; then
-            echo "OK: FullCone 用户态链路（libnftnl / nftables / firewall4）预编通过；内核模块随完整编译验证"
-            echo "FULLCONE=kept" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          echo "--- 预编失败，日志末尾 ---"
-          tail -40 "$LOG" || true
-          # 白名单式判据：只有明确指向 FullCone 源码 / 补丁的失败才降级。
-          # 其余任何非零退出都是真实错误，必须报错——否则这道闸门永远留着一个后门
-          # （拿到真错误也只会再发一条 warning，等于什么都没做）。
-          if grep -qE 'nft_ext_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)|nf_nat_fullcone\.c:[0-9]+:[0-9]+: (error|fatal error)|Hunk #[0-9]+ FAILED|patch does not apply' "$LOG"; then
-            drop_fullcone "确认 FullCone 源码或补丁与本树不兼容"
-          else
-            echo "::error::FullCone 预编失败，且报错不指向 FullCone 源码 —— 按真实错误处理，不降级"
-            exit 1
-          fi
+          echo "FULLCONE=kept" >> "$GITHUB_ENV"
+          echo "OK: FullCone 三份补丁到位，符号与依赖齐全（编译留给第 16 步完整编译）"
 
       - name: 编译固件
         working-directory: ppe-source
