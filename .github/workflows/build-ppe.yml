@@ -30,7 +30,9 @@ on:
       - '.github/workflows/build-ppe.yml'
 
 permissions:
-  contents: read
+  # write 是为了失败时能把日志 force-push 到 logs 分支。
+  # 私有仓库的 job 日志/artifact 都要登录才能读，logs 分支是唯一免登录可取的通道。
+  contents: write
 
 concurrency:
   group: ax6-ppe-${{ github.ref }}
@@ -291,26 +293,72 @@ jobs:
           # 然后一路走到"产物归集"才以 glob=0 的形式暴露，且失败诊断/日志上传因 success 被跳过。
           set -o pipefail
           export CCACHE_CONFIGPATH=/tmp/ccache.conf
-          make -j"$(nproc)" V=s 2>&1 | tee /tmp/build.log
+
+          echo "===== 第 1 轮：并行编译 ====="
+          rc=0
+          make -j"$(nproc)" V=s 2>&1 | tee /tmp/build.log || rc=$?
+
+          if [[ $rc -ne 0 ]]; then
+            # 移植自主线 build.yml 的成熟做法：OpenWrt 在 -j 高并发下的 race
+            # （临时文件抢写、host tool 并发）是很常见的假失败，-j1 重试往往直接过。
+            # 多花几分钟，换掉一整轮 70 分钟的损失，很值。
+            echo "::warning::并行编译失败（rc=$rc），改用单线程重试"
+            cp /tmp/build.log /tmp/build_parallel.log
+            set +e
+            timeout 45m make -j1 V=s 2>&1 | tee /tmp/build_serial.log
+            rc2=$?
+            set -e
+            # 串行日志接在并行日志后面，便于诊断看到完整过程
+            { echo; echo "===== 以下为 -j1 串行重试 ====="; cat /tmp/build_serial.log; } > /tmp/build.log
+            if [[ $rc2 -ne 0 ]]; then
+              echo "::error::并行与串行两轮都失败（rc=$rc / $rc2），是真实错误"
+              rc=$rc2
+            else
+              echo "OK: 串行重试通过 —— 首轮属于并行 race，非真实错误"
+              rc=0
+            fi
+          fi
+          exit $rc
 
       - name: 失败诊断
         if: failure() || cancelled()
         run: |
           LOG=/tmp/build.log
           [[ -f "$LOG" ]] || { echo "(无构建日志)"; exit 0; }
-          echo "===== 日志尾部 120 行 ====="
-          tail -120 "$LOG" || true
-          echo "===== 关键错误 ====="
-          grep -nE "error:|Error [0-9]|ERROR:|No space left|Killed|make.*\*\*\*|undefined reference|missing dependencies|Conflicts|failed to build" "$LOG" \
-            | tail -50 || echo "(未匹配)"
+          echo "===== 日志规模 ====="; wc -l "$LOG" || true
+
+          echo "===== 日志尾部 60 行 ====="
+          tail -60 "$LOG" || true
+
+          # 定位第一个"真实"错误。
+          # 上一版只做 tail -15，结果全是 `make[1]: *** [package/Makefile:251: .package_compile] Error 2`
+          # 这类顶层汇总行，看完等于没看。这里排除掉 (ignored) 与顶层汇总，取第一处。
+          first=$(grep -nE '(^|[^A-Za-z])(Error|error) [1-9][0-9]*($|[^0-9])' "$LOG" \
+                    | grep -v '(ignored)' \
+                    | grep -vE 'package/Makefile:[0-9]+: .*\.package_compile' \
+                    | grep -v 'toplevel\.mk' \
+                    | head -1 | cut -d: -f1)
+          echo "===== 第一个真实错误在第 ${first:-未找到} 行 ====="
+          : > /tmp/ctx.txt
+          if [[ -n "$first" ]]; then
+            start=$(( first > 60 ? first - 60 : 1 ))
+            end=$(( first + 20 ))
+            sed -n "${start},${end}p" "$LOG" >> /tmp/ctx.txt
+          fi
+
+          echo "===== 所有 Error 行（一次看全）====="
+          grep -nE 'make(\[[0-9]+\])?: \*\*\* \[[^]]+\] Error' "$LOG" | tail -30 || true
+
           # 关键行塞进 annotation：私有仓库的 job 日志要登录才能看，
           # 但 annotations 通过 API 免登录可读，出问题时不必人工贴日志。
-          msg=$(grep -nE "error:|Error [0-9]|\*\*\*|missing dependencies|failed to build" "$LOG" \
-            | tail -15 | sed 's/%/%25/g; s/\r//g' | tr '\n' '%0A')
-          if [[ -n "$msg" ]]; then
-            echo "::error::构建失败关键行（完整日志见 artifact ppe-build-log-${GITHUB_RUN_ID}）：%0A${msg}"
+          esc() { sed 's/%/%25/g; s/\r//g' | tr '\n' '%0A'; }
+          if [[ -s /tmp/ctx.txt ]]; then
+            echo "===== 错误上下文 ====="
+            cat /tmp/ctx.txt
+            echo "::error::编译失败上下文（第 ${first} 行附近，完整日志见 artifact ppe-build-log-${GITHUB_RUN_ID}）：%0A$(esc < /tmp/ctx.txt)"
           else
-            echo "::error::构建失败但未匹配到关键字，完整日志见 artifact ppe-build-log-${GITHUB_RUN_ID}"
+            tail -150 "$LOG" | esc > /tmp/t.txt
+            echo "::error::编译失败，未匹配到具体错误行，以下为日志尾部：%0A$(cat /tmp/t.txt)"
           fi
 
       - name: 上传编译日志（仅失败时）
@@ -321,6 +369,60 @@ jobs:
           path: /tmp/build.log
           if-no-files-found: ignore
           retention-days: 7
+
+      # 移植自主线 build.yml 的成熟机制（那边踩过"最需要日志时恰好拿不到"的坑）。
+      # artifact 与 job 日志都要登录才能下载，logs 分支 force-push 后本地 fetch 即可读，
+      # 不必再靠人工贴日志，也不必为了看错误再等一轮 77 分钟。
+      - name: 发布失败日志到 logs 分支
+        if: failure() || cancelled()
+        run: |
+          set +e
+          LOG=/tmp/build.log
+          [ -s "$LOG" ] || LOG=/tmp/build_serial.log
+          R=/tmp/failure-report.txt
+          {
+            echo "run_id  : ${{ github.run_id }}"
+            echo "commit  : ${{ github.sha }}"
+            echo "url     : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "time    : $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+            echo "logline : $(wc -l < "$LOG" 2>/dev/null || echo '?')"
+            echo
+            echo "########## 第一个真实错误（上下文 60 行） ##########"
+            first=$(grep -nE '(^|[^A-Za-z])(Error|error) [1-9][0-9]*($|[^0-9])' "$LOG" 2>/dev/null \
+                      | grep -v '(ignored)' \
+                      | grep -vE 'package/Makefile:[0-9]+: .*\.package_compile' \
+                      | grep -v 'toplevel\.mk' | head -1 | cut -d: -f1)
+            if [ -n "$first" ]; then
+              s=$(( first > 60 ? first - 60 : 1 ))
+              sed -n "${s},$(( first + 25 ))p" "$LOG"
+            else
+              echo "(未定位到具体错误行)"
+            fi
+            echo
+            echo "########## 失败目标（make *** Error） ##########"
+            grep -nE 'make(\[[0-9]+\])?: \*\*\* \[[^]]+\] Error' "$LOG" 2>/dev/null | tail -40
+            echo
+            echo "########## 关键字（末尾 100） ##########"
+            grep -nE "ERROR:|error:|Error [0-9]|failed to build|Collected errors|No space left|Killed|undefined reference|missing dependencies|Conflicts|unable to select packages|breaks:" "$LOG" 2>/dev/null | tail -100
+            echo
+            echo "########## 日志末尾 800 行 ##########"
+            tail -800 "$LOG"
+          } > "$R" 2>&1
+          echo "报告大小: $(wc -c < "$R") 字节"
+
+          mkdir -p /tmp/logpush && cd /tmp/logpush
+          git init -q
+          git symbolic-ref HEAD refs/heads/logs
+          git config user.email "ci@ax6build.local"
+          git config user.name "ax6build-ci"
+          cp "$R" "ppe-failure-${GITHUB_RUN_ID}.txt"
+          git add -A
+          git commit -q -m "PPE failure log run $GITHUB_RUN_ID ($GITHUB_SHA)" || true
+          if git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" logs; then
+            echo "OK: 已发布到 logs 分支 → ppe-failure-${GITHUB_RUN_ID}.txt"
+          else
+            echo "::warning::发布 logs 分支失败（不影响主流程）"
+          fi
 
       - name: 校验并归集产物
         working-directory: ppe-source
