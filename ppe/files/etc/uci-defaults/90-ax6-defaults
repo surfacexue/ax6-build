@@ -1,0 +1,44 @@
+#!/bin/sh
+# AX6 PPE 固件默认值修正（首次启动执行一次，跑完由 procd 自动删除本文件）
+#
+# 原则：只改"无争议的默认值"，不动拓扑行为。
+# DHCP 是否开启、无线 SSID、LAN 地址，都留给使用者按现场决定，不在这里预置。
+
+# 1) 时区
+# 固件默认 GMT0/UTC，本机没有 RTC，不接 WAN 就拿不到 NTP，
+# 时间会一直停在固件编译时刻（表现为日志时间戳倒退、cron 触发错点）。
+uci -q set system.@system[0].timezone='CST-8'
+uci -q set system.@system[0].zonename='Asia/Shanghai'
+
+# 2) 日志容量
+# 默认 128 KB 环形缓冲，跑一两天就把开机记录滚光。
+# 1 MB 对 411 MB 内存无压力；log_file 落 tmpfs（不写 flash，避免磨损）。
+# /etc/init.d/log 会用 logread -f -F 常驻把内容追加到这个文件。
+uci -q set system.@system[0].log_size='1024'
+uci -q set system.@system[0].log_file='/tmp/log/messages'
+
+# 3) 内网域名
+# 让客户端拿到 .lan 后缀，dnsmasq 才能解析 hostname.lan。
+uci -q set dhcp.lan.domain='lan'
+
+# 4) FullCone
+# 内核模块 + libnftnl + nftables + firewall4 四件套已随固件编入，
+# 但 fw4 的默认值是 0，必须显式打开才会生成 fullcone 语句。
+uci -q set firewall.@defaults[0].fullcone='1'
+
+# 5) 清掉 homeproxy 未启用时残留的 firewall include
+# /var/run/homeproxy/fw4_*.nft 是运行时生成的文件，服务没跑就不存在，
+# fw4 每次 reload 都会刷三条 "unreachable path ... ignoring section"。
+# 以后真要启用代理时，按 README「恢复 homeproxy include」一节把三行加回。
+if [ "$(uci -q get homeproxy.config.enabled)" != "1" ]; then
+	for _sec in $(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.=]*\)\.path='.*homeproxy.*/\1/p"); do
+		uci -q delete "firewall.$_sec"
+	done
+	unset _sec
+fi
+
+uci -q commit system
+uci -q commit dhcp
+uci -q commit firewall
+
+exit 0

@@ -158,6 +158,21 @@ jobs:
           check luci-app-adblock-fast "广告过滤界面"
           check adblock-fast          "广告过滤服务"
           check dnsmasq-full          "adblock-fast 的 nftset 后端（普通变体不编 HAVE_NFTSET）"
+          check iperf3                "压测工具（换机现场没网，必须预装）"
+          check tcpdump               "抓包工具（无 WAN 时装不了）"
+          check openssl-util          "证书命令行"
+          check kmod-ramoops          "崩溃现场保留（pstore/ramoops，设备树已留 1 MiB）"
+
+          echo "--- ttyd 事件循环修复：不应再选 libwebsockets-full ---"
+          # ttyd 1.7.7 + libwebsockets 5.1.0 的 full 变体（带 LWS_WITH_LIBUV）
+          # 会与 ttyd 自己的 libuv 抢 loop，表现为起动 9 ms 后自毁、procd 无限重启。
+          # prepare.sh 已把 ttyd 依赖改成 libwebsockets-openssl；若这里仍启用 full，
+          # 说明 sed 没命中，直接拦下，别把带崩 ttyd 的固件发出去。
+          if grep -qx 'CONFIG_PACKAGE_libwebsockets-full=y' .config; then
+            echo "::error::libwebsockets-full 仍被启用，ttyd 会启动即崩（prepare.sh 的 sed 未命中）"; fail=1
+          else
+            echo "OK   libwebsockets-full 未启用"
+          fi
 
           echo "--- 互斥项：dnsmasq 三个变体抢同一组文件 ---"
           for bad in CONFIG_PACKAGE_dnsmasq=y CONFIG_PACKAGE_dnsmasq-dhcpv6=y; do

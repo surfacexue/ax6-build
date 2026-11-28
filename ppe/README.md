@@ -216,6 +216,82 @@ compatible 含 `redmi,ax6-stock`，不含 `xiaomi,ax3600`。刷在单卷 stock �
   `luci.mk` 兜底，apk 装了能跑，只是以后从仓库升级时版本比较会失真。
 - FullCone 装上了但配置默认关闭，规则里不会出现 fullcone 表达式。
 
+## 2026-11-28 修订（真机自检后的一版）
+
+第一版固件在 AX6 上跑完一轮全模块自检（底座/DNS/Web/无线/PPE/防火墙/PPPoE 全过），
+其余问题归为五类，这一版逐条修。**改动只落在本地文件，未推送、未编译。**
+
+### 1. ttyd 启动即崩 → 换 libwebsockets 变体
+
+设备实测：
+
+```
+elops_init_pt_uv: Using foreign event loop...
+Listening on port: 7681
+lws_context_destroy: initiated          ← 9 ms 后
+procd: incarnation 23, exit_code 0
+```
+
+根因：`libwebsockets-full` 编了 `-DLWS_WITH_LIBUV=ON`，而 ttyd 1.7.7 自己也链
+`libuv.so.1` 并驱动它（`ldd /usr/bin/ttyd` 可见）。两套抢同一个 loop，lws 直接销毁 context。
+退出码 0 所以 procd 一直重拉，日志里只会无限刷同一段。
+
+改法：`prepare.sh` 在 feeds 阶段把 ttyd 依赖从 `+libwebsockets-full` 改成
+`+libwebsockets-openssl`——该变体不带 LIBUV、不带 plugins/CGI，ttyd 都用不上。
+设备上确认过**整机只有 ttyd 依赖 `libwebsockets-full`**，不牵连别的包。
+
+workflow 加了拦截：`.config` 里若仍出现 `CONFIG_PACKAGE_libwebsockets-full=y` 直接失败。
+
+### 2. 系统默认值 → 新增 `files/` overlay
+
+`files/etc/uci-defaults/90-ax6-defaults`，首次启动执行一次：
+
+| 项 | 改成 | 原来 | 为什么要改 |
+|---|---|---|---|
+| 时区 | `CST-8` / `Asia/Shanghai` | `GMT0` / `UTC` | 本机无 RTC，不接 WAN 时间停在固件编译时刻 |
+| 日志 | `log_size=1024` + `log_file=/tmp/log/messages` | 128 KB | 跑一两天就把开机记录滚光，查问题没依据 |
+| 内网域名 | `dhcp.lan.domain='lan'` | 未设置 | `hostname.lan` 解析成 NXDOMAIN |
+| FullCone | `firewall.@defaults[0].fullcone='1'` | 默认 0 | 四件套编进去了但开关没开，等于白装 |
+| homeproxy | 未启用时删掉 3 个 firewall include | 留着 | 每次 fw4 reload 刷三条 `unreachable path` warning |
+
+**恢复 homeproxy include**（以后真要启用代理时手工加回，否则透明代理不生效）：
+
+```sh
+uci add firewall include
+uci set firewall.@include[-1].name='homeproxy_forward'
+uci set firewall.@include[-1].path='/var/run/homeproxy/fw4_forward.nft'
+uci set firewall.@include[-1].type='nftables'
+# 另两条同理：homeproxy_input → fw4_input.nft，homeproxy_post → fw4_post.nft
+uci commit firewall
+```
+
+### 3. 崩溃现场 → 补 pstore / ramoops
+
+设备树早就给 ramoops 留了 1 MiB（`ramoops@51200000`, nomap non-reusable），
+但第一版内核没编 pstore：`/sys/fs/pstore` 不存在，`/proc/kallsyms` 里 pstore 符号为 0。
+异常重启、oops、panic 全都抓不到现场。
+
+加 `CONFIG_PACKAGE_kmod-ramoops=y`（依赖自动拉 `kmod-pstore` + `kmod-reed-solomon`，
+KCONFIG 带 `CONFIG_PSTORE` / `_CONSOLE` / `_RAM`）。
+`files/etc/rc.local` 每次启动挂 pstore，有内容就追加到 `/etc/pstore-archive/last-crash.log`
+（超过 200 KB 只留尾部），然后清空 pstore，避免同一条记录反复累积。
+
+### 4. 补三个命令行工具
+
+`iperf3` / `tcpdump` / `openssl-util`，合计约 1 MiB。
+理由：换机现场恰恰没网，`apk add` 装不了，而压测吞吐、抓包定位、手工签证书都要用这些。
+
+### 5. `prepare.sh` 加 7/7 步
+
+把 `../ppe/files/` 复制到源码树 `files/`，并 `chmod 755` 补回 Windows 检出丢掉的可执行位
+（否则 `rc.local` 和 `uci-defaults` 不会执行，改了等于没改）。
+
+### 这一版**没**动的
+
+- `luci-app-fullcone` 版本号仍是 `0`（见下文「两处已知瑕疵」），不影响运行。
+- 无线默认仍保持官方行为：`radio0/radio1` 上电、两个 iface `disabled=1`。不预置 SSID。
+- DHCP 是否开启、LAN 地址，都不在固件里预置，由阶段四/五按现场配置。
+
 ## 已知风险（按严重度）
 
 | 风险 | 说明 |

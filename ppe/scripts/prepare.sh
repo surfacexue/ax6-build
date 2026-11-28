@@ -183,6 +183,23 @@ else:
             break
 PY
 
+# ttyd 1.7.7 与 libwebsockets 5.1.0 的事件循环冲突（2026-11-28 修）
+#   full 变体编了 -DLWS_WITH_LIBUV=ON，ttyd 自己也链 libuv 并驱动它，
+#   lws 起动时打 "elops_init_pt_uv: Using foreign event loop"，9 ms 后
+#   lws_context_destroy，procd 无限重启（exit_code 0，从日志看不出是崩溃）。
+#   ttyd 只需要 SSL + HTTP server，不需要 lws 的 plugins / CGI / uv 集成，
+#   换到不带 LIBUV 的 openssl 变体即可；ttyd 自带的 libuv 照常用。
+#   设备实测确认：整机只有 ttyd 依赖 libwebsockets-full，改这一个依赖不牵连别的包。
+ttyd_mk='feeds/packages/utils/ttyd/Makefile'
+if [[ -f "$ttyd_mk" ]] && grep -q '+libwebsockets-full' "$ttyd_mk"; then
+  sed -i 's/+libwebsockets-full/+libwebsockets-openssl/' "$ttyd_mk"
+  echo 'OK: ttyd 改用 libwebsockets-openssl（无 LIBUV，修复启动即销毁）'
+elif [[ -f "$ttyd_mk" ]] && grep -q '+libwebsockets-openssl' "$ttyd_mk"; then
+  echo 'OK: ttyd 已是 libwebsockets-openssl，跳过'
+else
+  echo 'WARN: 找不到 ttyd Makefile 或依赖写法变了，跳过（ttyd 可能仍启动即崩）' >&2
+fi
+
 ./scripts/feeds install -a
 
 echo '--- 溯源 ---'
@@ -192,4 +209,17 @@ for feed in feeds/luci feeds/packages feeds/nss; do
 done
 echo "immortalwrt/luci $(cat ./LUCI-SHA.txt)"
 echo 'fullconenat-nft 来自本仓库 ppe/pkgs/（源码 07d93b6 + ImmortalWrt 的两份补丁）'
+echo '===== 7/7 注入 files/ 覆盖（默认值修正 + pstore 转存）====='
+if [[ -d ../ppe/files ]]; then
+  mkdir -p files
+  cp -a ../ppe/files/. files/
+  # Windows 检出常丢可执行位，这里显式补回，否则 rc.local 与 uci-defaults 不执行
+  chmod 755 files/etc/rc.local 2>/dev/null || true
+  chmod 755 files/etc/uci-defaults/* 2>/dev/null || true
+  echo "OK: 已注入 files/（$(find files -type f | wc -l) 个文件）"
+  find files -type f | sed 's/^/    /'
+else
+  echo 'WARN: ../ppe/files 不存在，跳过 overlay 注入' >&2
+fi
+
 echo '源准备完成。注意：编译成功不等于可刷，见 ppe/README.md 的验收清单。'
