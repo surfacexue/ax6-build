@@ -59,37 +59,37 @@ CMAKE_OPTIONS += -DLWS_WITHOUT_TEST_PING=ON
 CMAKE_OPTIONS += -DLWS_WITHOUT_TEST_CLIENT=ON
 
 define Package/libwebsockets/Default
-  SECTION:=libs
-  CATEGORY:=Libraries
-  TITLE:=libwebsockets
-  DEPENDS:=+zlib +libcap +libubox
-  URL:=https://libwebsockets.org
-  MAINTAINER:=Karl Palsson
+	SECTION:=libs
+	CATEGORY:=Libraries
+	TITLE:=libwebsockets
+	DEPENDS:=+zlib +libcap +libubox
+	URL:=https://libwebsockets.org
+	MAINTAINER:=Karl Palsson <karlp@etactica.com>
 endef
 
 define Package/libwebsockets-openssl
-  $(call Package/libwebsockets/Default)
-  TITLE += (OpenSSL)
-  DEPENDS += +libopenssl
-  VARIANT:=openssl
-  CONFLICTS:=libwebsockets-full
+	$(call Package/libwebsockets/Default)
+	TITLE += (OpenSSL)
+	DEPENDS += +libopenssl
+	VARIANT:=openssl
+	CONFLICTS:=libwebsockets-full
 endef
 
 define Package/libwebsockets-mbedtls
-  $(call Package/$(PKG_NAME)/Default)
-  TITLE += (mbedTLS)
-  DEPENDS += +libmbedtls
-  VARIANT:=mbedtls
-  PROVIDES:=libwebsockets
-  CONFLICTS:=libwebsockets-openssl
+	$(call Package/$(PKG_NAME)/Default)
+	TITLE += (mbedTLS)
+	DEPENDS += +libmbedtls
+	VARIANT:=mbedtls
+	PROVIDES:=libwebsockets
+	CONFLICTS:=libwebsockets-openssl
 endef
 
 define Package/libwebsockets-full
-  $(call Package/libwebsockets/Default)
-  TITLE += (Full - OpenSSL, libuv, plugins, CGI)
-  DEPENDS += +libopenssl +libuv
-  VARIANT:=full
-  PROVIDES:=libwebsockets libwebsockets-openssl
+	$(call Package/libwebsockets/Default)
+	TITLE += (Full - OpenSSL, libuv, plugins, CGI)
+	DEPENDS += +libopenssl +libuv
+	VARIANT:=full
+	PROVIDES:=libwebsockets libwebsockets-openssl
 endef
 
 ifeq ($(BUILD_VARIANT),openssl)
@@ -113,8 +113,8 @@ ifeq ($(BUILD_VARIANT),full)
 endif
 
 define Package/libwebsockets/install
-  $(INSTALL_DIR) $(1)/usr/lib
-  $(CP) $(PKG_INSTALL_DIR)/usr/lib/libwebsockets*.so* $(1)/usr/lib/
+	$(INSTALL_DIR) $(1)/usr/lib
+	$(CP) $(PKG_INSTALL_DIR)/usr/lib/libwebsockets*.so* $(1)/usr/lib/
 endef
 
 Package/libwebsockets-mbedtls/install = $(Package/libwebsockets/install)
@@ -122,8 +122,8 @@ Package/libwebsockets-mbedtls/install = $(Package/libwebsockets/install)
 Package/libwebsockets-openssl/install = $(Package/libwebsockets/install)
 
 define Package/libwebsockets-full/install
-  $(call Package/libwebsockets/install,$(1))
-  $(CP) $(PKG_INSTALL_DIR)/usr/lib/libwebsockets-evlib_uv.so* $(1)/usr/lib
+	$(call Package/libwebsockets/install,$(1))
+	$(CP) $(PKG_INSTALL_DIR)/usr/lib/libwebsockets-evlib_uv.so* $(1)/usr/lib
 endef
 
 $(eval $(call BuildPackage,libwebsockets-openssl))
