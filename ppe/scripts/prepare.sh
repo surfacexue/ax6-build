@@ -183,21 +183,36 @@ else:
             break
 PY
 
-# ttyd 1.7.7 与 libwebsockets 5.1.0 的事件循环冲突（2026-11-28 修）
-#   full 变体编了 -DLWS_WITH_LIBUV=ON，ttyd 自己也链 libuv 并驱动它，
-#   lws 起动时打 "elops_init_pt_uv: Using foreign event loop"，9 ms 后
-#   lws_context_destroy，procd 无限重启（exit_code 0，从日志看不出是崩溃）。
-#   ttyd 只需要 SSL + HTTP server，不需要 lws 的 plugins / CGI / uv 集成，
-#   换到不带 LIBUV 的 openssl 变体即可；ttyd 自带的 libuv 照常用。
-#   设备实测确认：整机只有 ttyd 依赖 libwebsockets-full，改这一个依赖不牵连别的包。
-ttyd_mk='feeds/packages/utils/ttyd/Makefile'
-if [[ -f "$ttyd_mk" ]] && grep -q '+libwebsockets-full' "$ttyd_mk"; then
-  sed -i 's/+libwebsockets-full/+libwebsockets-openssl/' "$ttyd_mk"
-  echo 'OK: ttyd 改用 libwebsockets-openssl（无 LIBUV，修复启动即销毁）'
-elif [[ -f "$ttyd_mk" ]] && grep -q '+libwebsockets-openssl' "$ttyd_mk"; then
-  echo 'OK: ttyd 已是 libwebsockets-openssl，跳过'
+# libwebsockets 钉版 4.3.3（2026-11-28 二次修，替代原先"换 openssl 变体"的做法）
+#
+#   上一版做法是 sed 把 ttyd 依赖 +libwebsockets-full 换成 +libwebsockets-openssl，
+#   想法是"去掉 LWS_WITH_LIBUV，别跟 ttyd 抢事件循环"。这条路走不通：
+#   ttyd 1.7.7 的 CMakeLists.txt:64 硬性要求 LWS_WITH_LIBUV，openssl 变体没有，
+#   直接 FATAL_ERROR "libwebsockets was not build with libuv support"，
+#   编译必然失败（run 46110723733 实测）。而 ttyd 最新版就是 1.7.7，没有 1.7.8+。
+#
+#   所以 ttyd 依赖必须保持 full；真正要动的是 lws 自己：
+#   master 的 5.1.0 改写了 external event loop，与 ttyd 的 uvwasi 主循环不兼容
+#   （设备实测 9ms 后 lws_context_destroy、exit_code 0、procd 无限重启）。
+#   OpenWrt 24.10 稳定版是 lws 4.3.3 + ttyd 1.7.7 + full，社区验证可用 —— 钉回 4.3.3。
+lws_mk='feeds/packages/libs/libwebsockets/Makefile'
+lws_pin='../ppe/pkgs/libwebsockets/Makefile'
+if [[ -f "$lws_mk" ]] && grep -q 'PKG_VERSION:=4\.3\.3' "$lws_mk"; then
+  echo 'OK: libwebsockets 已是 4.3.3，跳过'
+elif [[ -f "$lws_mk" ]] && [[ -f "$lws_pin" ]]; then
+  _old=$(grep -m1 '^PKG_VERSION:=' "$lws_mk")
+  cp "$lws_pin" "$lws_mk"
+  echo "OK: libwebsockets ${_old#*:=} -> 4.3.3（24.10 稳定组合，修复 ttyd 启动即崩）"
 else
-  echo 'WARN: 找不到 ttyd Makefile 或依赖写法变了，跳过（ttyd 可能仍启动即崩）' >&2
+  echo 'WARN: 找不到 libwebsockets Makefile 或 ppe/pkgs 下的钉版文件，跳过（ttyd 可能仍崩）' >&2
+fi
+
+# 兜底：万一 feeds 里的 ttyd 被人改成了 openssl 变体，改回 full。
+# full 才有 LWS_WITH_LIBUV，ttyd 的 CMake 硬检查要的就是它。
+ttyd_mk='feeds/packages/utils/ttyd/Makefile'
+if [[ -f "$ttyd_mk" ]] && grep -q '+libwebsockets-openssl' "$ttyd_mk"; then
+  sed -i 's/+libwebsockets-openssl/+libwebsockets-full/' "$ttyd_mk"
+  echo 'OK: ttyd 依赖已纠正回 libwebsockets-full（lws 4.3.3 下正确）'
 fi
 
 ./scripts/feeds install -a

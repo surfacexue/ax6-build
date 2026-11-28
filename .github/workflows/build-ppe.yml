@@ -180,15 +180,26 @@ jobs:
           check openssl-util          "证书命令行"
           check kmod-ramoops          "崩溃现场保留（pstore/ramoops，设备树已留 1 MiB）"
 
-          echo "--- ttyd 事件循环修复：不应再选 libwebsockets-full ---"
-          # ttyd 1.7.7 + libwebsockets 5.1.0 的 full 变体（带 LWS_WITH_LIBUV）
-          # 会与 ttyd 自己的 libuv 抢 loop，表现为起动 9 ms 后自毁、procd 无限重启。
-          # prepare.sh 已把 ttyd 依赖改成 libwebsockets-openssl；若这里仍启用 full，
-          # 说明 sed 没命中，直接拦下，别把带崩 ttyd 的固件发出去。
+          echo "--- ttyd 依赖校验：必须是 libwebsockets-full（带 LIBUV）---"
+          # ttyd 1.7.7 的 CMakeLists.txt:64 硬性要求 LWS_WITH_LIBUV，只有 full 变体编了这个。
+          # 换成 libwebsockets-openssl 会直接 FATAL_ERROR（run 46110723733 实测）。
           if grep -qx 'CONFIG_PACKAGE_libwebsockets-full=y' .config; then
-            echo "::error::libwebsockets-full 仍被启用，ttyd 会启动即崩（prepare.sh 的 sed 未命中）"; fail=1
+            echo "OK   libwebsockets-full 已启用（含 LWS_WITH_LIBUV）"
           else
-            echo "OK   libwebsockets-full 未启用"
+            echo "::error::libwebsockets-full 未启用 —— ttyd 会因缺 LWS_WITH_LIBUV 编译失败"; fail=1
+          fi
+          if grep -qx 'CONFIG_PACKAGE_libwebsockets-openssl=y' .config; then
+            echo "::error::libwebsockets-openssl 与 full 冲突且无 libuv，ttyd 编不过"; fail=1
+          fi
+
+          echo "--- libwebsockets 版本校验：必须 4.3.3 ---"
+          # lws master 的 5.1.0 改了 external event loop，与 ttyd 的 uvwasi 主循环不兼容：
+          # 设备实测起动 9ms 后 lws_context_destroy、exit_code 0、procd 无限重启。
+          # prepare.sh 用 ppe/pkgs/libwebsockets/Makefile 覆盖成 24.10 的 4.3.3。
+          if grep -q '^PKG_VERSION:=4\.3\.3' feeds/packages/libs/libwebsockets/Makefile 2>/dev/null; then
+            echo "OK   libwebsockets 4.3.3"
+          else
+            echo "::error::libwebsockets 不是 4.3.3（prepare.sh 的钉版未生效），ttyd 会启动即崩"; fail=1
           fi
 
           echo "--- 互斥项：dnsmasq 三个变体抢同一组文件 ---"

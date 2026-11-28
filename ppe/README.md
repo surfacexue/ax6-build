@@ -232,7 +232,7 @@ compatible 含 `redmi,ax6-stock`，不含 `xiaomi,ax3600`。刷在单卷 stock �
 第一版固件在 AX6 上跑完一轮全模块自检（底座/DNS/Web/无线/PPE/防火墙/PPPoE 全过），
 其余问题归为五类，这一版逐条修。**改动只落在本地文件，未推送、未编译。**
 
-### 1. ttyd 启动即崩 → 换 libwebsockets 变体
+### 1. ttyd 启动即崩 → libwebsockets 钉回 4.3.3
 
 设备实测：
 
@@ -243,15 +243,34 @@ lws_context_destroy: initiated          ← 9 ms 后
 procd: incarnation 23, exit_code 0
 ```
 
-根因：`libwebsockets-full` 编了 `-DLWS_WITH_LIBUV=ON`，而 ttyd 1.7.7 自己也链
-`libuv.so.1` 并驱动它（`ldd /usr/bin/ttyd` 可见）。两套抢同一个 loop，lws 直接销毁 context。
-退出码 0 所以 procd 一直重拉，日志里只会无限刷同一段。
+**第一次尝试（失败，已废弃）**：把 ttyd 依赖从 `+libwebsockets-full` 改成
+`+libwebsockets-openssl`，想靠去掉 `LWS_WITH_LIBUV` 避免"抢事件循环"。
+这条路根本走不通 —— ttyd 1.7.7 的 `CMakeLists.txt:64` **硬性要求** LWS_WITH_LIBUV：
 
-改法：`prepare.sh` 在 feeds 阶段把 ttyd 依赖从 `+libwebsockets-full` 改成
-`+libwebsockets-openssl`——该变体不带 LIBUV、不带 plugins/CGI，ttyd 都用不上。
-设备上确认过**整机只有 ttyd 依赖 `libwebsockets-full`**，不牵连别的包。
+```
+CMake Error at CMakeLists.txt:64 (message):
+  libwebsockets was not build with libuv support (-DLWS_WITH_LIBUV=ON)
+ERROR: package/feeds/packages/ttyd failed to build.
+```
 
-workflow 加了拦截：`.config` 里若仍出现 `CONFIG_PACKAGE_libwebsockets-full=y` 直接失败。
+而且 ttyd 最新版就是 1.7.7（2024-03-30），**不存在可升的 1.7.8 / 1.7.9**。
+
+**真正的原因在 lws 版本**：这条线跟 openwrt master，feeds 里是 libwebsockets **5.1.0**。
+5.x 重写了 external event loop 的实现，与 ttyd 1.7.7 的 uvwasi 主循环不兼容，
+于是起动 9 ms 后 `lws_context_destroy`、退出码 0，procd 无限重拉。
+**OpenWrt 24.10 稳定版用的是 lws 4.3.3 + ttyd 1.7.7 + `libwebsockets-full`**，
+社区大范围验证可用 —— 这是钉版的依据。
+
+**改法**：
+
+- 新增 `ppe/pkgs/libwebsockets/Makefile`（取自 openwrt-24.10，4.3.3；
+  修正了上游 `-DISABLE_WERROR=ON` 少一个 D 的笔误）
+- `prepare.sh` 在 `feeds update` 之后、`feeds install` 之前用它覆盖 feeds 里的同名文件
+- ttyd 依赖保持上游原样 `+libwebsockets-full`，另加兜底：若被改成 openssl 就改回 full
+
+**CI 校验（已反向）**：`.config` 必须出现 `CONFIG_PACKAGE_libwebsockets-full=y`，
+且 `feeds/packages/libs/libwebsockets/Makefile` 的 `PKG_VERSION` 必须是 4.3.3，
+否则直接失败 —— 缺 LIBUV 编不过，版本错了起来就崩，两种都不能发出去。
 
 ### 2. 系统默认值 → 新增 `files/` overlay
 
