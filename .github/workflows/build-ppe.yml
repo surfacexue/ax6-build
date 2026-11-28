@@ -161,6 +161,8 @@ jobs:
           check kmod-nft-tproxy       "HomeProxy 透明代理"
           check ucode-mod-digest      "HomeProxy 依赖的 ucode digest"
           check luci-app-ttyd         "网页终端"
+          check luci-app-ddns         "动态 DNS 界面（v3 增补）"
+          check luci-i18n-ddns-zh-cn  "动态 DNS 中文语言包"
           check luci-app-filemanager  "文件管理"
           check luci-app-upnp         "UPnP 界面"
           check miniupnpd-nftables    "UPnP 守护进程（nftables 变体）"
