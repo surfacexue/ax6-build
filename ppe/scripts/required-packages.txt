@@ -1,0 +1,55 @@
+# AX6 PPE-NSS 必装包清单（唯一真源）
+#
+# 为什么要有这个文件：同一份清单在两个时机用，语义不同，不能只留一份。
+#   前置「校验核心功能包（缺失即中止）」：查 CONFIG_PACKAGE_<name>=y —— 证明包被「选中」，失败代价 1–2 分钟
+#   后置「校验并归集产物」           ：查 <target>.manifest —— 证明包「真进了镜像」
+# 两处都读本文件，加包只改这里一处；两份硬编码清单迟早漂移，那比没有校验更坏。
+#
+# 格式：`包名<TAB>hard|soft<TAB>说明`。空行与 # 开头为注释。
+#   级别只对后置生效（前置全数中止，因为此时还没编译，早失败零浪费）：
+#   hard = 缺了这轮固件不能组网 / 不能管理 / 不能远程救回 → ::error:: + exit 1，产物不落地
+#   soft = 缺了只是少一个界面、语言包、可选功能或现场工具 → ::warning::，照常上传，缺失写进 out/MISSING-SOFT.txt
+# 注意 1：manifest 行是 `<name> - <version>`，不是裸包名，必须按行首匹配。
+# 注意 2：带 ABI 的库在 manifest 里带数字后缀（实测 libwebsockets-full -> libwebsockets-full23），
+#         后置按「包名 + 纯数字后缀」容错；而 .config 里的 CONFIG_PACKAGE_ 名字不带后缀。
+#
+# 机器读的两行（改清单必须同步改第一行，否则 CI 直接失败）：
+#expect=35
+#forbid=libwebsockets-openssl,dnsmasq,dnsmasq-dhcpv6,sing-box
+
+# --- 无线与 NSS ---
+kmod-nss-wifi-drv	hard	NSS WiFi 驱动（缺则无无线）
+nss-firmware-ipq807x	hard	NSS 固件 blob（缺则驱动起不来）
+kmod-nft-fullcone	hard	FullCone NAT 内核模块（ppe/pkgs）
+nftables-json	hard	nftables（带 fullcone 表达式补丁，缺则 FullCone 规则加载失败）
+firewall4	hard	fw4（缺则无 NAT / 无防火墙）
+dnsmasq-full	hard	DHCP/DNS，且是 adblock-fast 的 nftset 后端（普通变体不编 HAVE_NFTSET）
+ttyd	hard	网页终端本体（换机现场唯一的救急入口）
+libwebsockets-full	hard	ttyd 1.7.7 需要 LWS_WITH_LIBUV，只有 full 变体编了（manifest 里带 ABI 后缀）
+kmod-tun	hard	tailscale 依赖的 TUN
+tailscale	hard	远程接入通道（换机后靠它进机器）
+kmod-wireguard	hard	WireGuard 内核模块（备用远程通道）
+wireguard-tools	hard	wg 用户态工具
+luci-ssl	soft	HTTPS 管理页（缺则退回 http，仍能管理）
+luci-theme-argon	soft	Argon 主题（缺则用默认主题）
+luci-proto-wireguard	soft	LuCI WireGuard 页面（uci 仍可配）
+luci-app-homeproxy	soft	代理界面（ImmortalWrt luci，prepare.sh 3/6）
+sing-box-tiny	soft	代理内核（已去掉 QUIC/gVisor）
+kmod-nft-tproxy	soft	HomeProxy 透明代理
+ucode-mod-digest	soft	HomeProxy 依赖的 ucode digest
+luci-app-ttyd	soft	网页终端的 LuCI 页（ttyd 本体在就能进）
+luci-app-ddns	soft	动态 DNS 界面（v3 增补）
+luci-i18n-ddns-zh-cn	soft	动态 DNS 中文语言包
+luci-app-wol	soft	网络唤醒界面（发魔术包）
+luci-i18n-wol-zh-cn	soft	网络唤醒中文语言包
+etherwake	soft	luci-app-wol 的硬依赖（LUCI_DEPENDS:=+etherwake）
+luci-app-filemanager	soft	文件管理
+luci-app-upnp	soft	UPnP 界面
+miniupnpd-nftables	soft	UPnP 守护进程（nftables 变体）
+luci-app-fullcone	soft	FullCone 的 LuCI 页（内核模块在，uci 可开）
+luci-app-adblock-fast	soft	广告过滤界面
+adblock-fast	soft	广告过滤服务
+iperf3	soft	压测工具（换机现场没网，必须预装）
+tcpdump	soft	抓包工具（无 WAN 时装不了）
+openssl-util	soft	证书命令行
+kmod-ramoops	soft	崩溃现场保留（pstore/ramoops，设备树已留 1 MiB）

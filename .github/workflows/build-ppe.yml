@@ -141,47 +141,32 @@ jobs:
         run: |
           set -e
           fail=0
-          check() {
-            if grep -qx "CONFIG_PACKAGE_$1=y" .config; then
-              echo "OK   $1"
+          # 必装包清单的唯一真源：ppe/scripts/required-packages.txt
+          # 本步查 .config（包被“选中”，1–2 分钟就失败）；同一份清单在「校验并归集产物」里
+          # 还会再查一次 manifest（包真“进了镜像”）。加包只改那一份文件，别在本文件再抄一份。
+          # 本步不区分 hard/soft：此刻还没编译，缺任何一条都该立刻停，早失败零浪费。
+          LIST=../ppe/scripts/required-packages.txt
+          [[ -f "$LIST" ]] || { echo "::error::缺少必装包清单 $LIST"; exit 1; }
+          # 条数由清单自己声明（#expect=N），清单缩短时只改数据，不改 workflow。
+          expect=$(grep -m1 -o '^#expect=[0-9][0-9]*' "$LIST" | cut -d= -f2)
+          [[ -n "$expect" ]] || { echo "::error::清单缺 #expect=N 行，无法核对条数"; exit 1; }
+          total=0
+          while IFS=$'\t' read -r pkg grade desc; do
+            case "$pkg" in ''|'#'*) continue ;; esac
+            total=$((total+1))
+            case "$grade" in
+              hard|soft) ;;
+              *) echo "::error::清单级别非法（只许 hard/soft）：$pkg => '${grade}'"; fail=1; continue ;;
+            esac
+            if grep -qxF "CONFIG_PACKAGE_${pkg}=y" .config; then
+              echo "OK   $pkg"
             else
-              echo "::error::缺少 $1（$2）"; fail=1
+              echo "::error::缺少 $pkg（$desc）"; fail=1
             fi
-          }
-          check kmod-nss-wifi-drv     "NSS WiFi 驱动"
-          check nss-firmware-ipq807x  "NSS 固件 blob"
-          check kmod-wireguard        "WireGuard 内核模块"
-          check wireguard-tools       "wg 用户态"
-          check luci-proto-wireguard  "LuCI WireGuard 页面"
-          check kmod-tun              "tailscale 依赖的 TUN"
-          check tailscale             "tailscale"
-          check luci-ssl              "HTTPS 管理页"
-          check luci-theme-argon      "Argon 主题"
-          check firewall4             "fw4"
-          check luci-app-homeproxy    "代理界面（ImmortalWrt luci，prepare.sh 3/6）"
-          check sing-box-tiny         "代理内核（已去掉 QUIC/gVisor）"
-          check kmod-nft-tproxy       "HomeProxy 透明代理"
-          check ucode-mod-digest      "HomeProxy 依赖的 ucode digest"
-          check ttyd                 "网页终端的守护进程本体"
-          check luci-app-ttyd         "网页终端"
-          check luci-app-ddns         "动态 DNS 界面（v3 增补）"
-          check luci-i18n-ddns-zh-cn  "动态 DNS 中文语言包"
-          check luci-app-wol          "网络唤醒界面（发魔术包）"
-          check luci-i18n-wol-zh-cn   "网络唤醒中文语言包"
-          check etherwake             "luci-app-wol 的硬依赖（LUCI_DEPENDS:=+etherwake）"
-          check luci-app-filemanager  "文件管理"
-          check luci-app-upnp         "UPnP 界面"
-          check miniupnpd-nftables    "UPnP 守护进程（nftables 变体）"
-          check kmod-nft-fullcone     "FullCone NAT 内核模块（ppe/pkgs）"
-          check luci-app-fullcone     "FullCone 的 LuCI 页（ppe/pkgs）"
-          check nftables-json         "nftables（带 fullcone 表达式补丁）"
-          check luci-app-adblock-fast "广告过滤界面"
-          check adblock-fast          "广告过滤服务"
-          check dnsmasq-full          "adblock-fast 的 nftset 后端（普通变体不编 HAVE_NFTSET）"
-          check iperf3                "压测工具（换机现场没网，必须预装）"
-          check tcpdump               "抓包工具（无 WAN 时装不了）"
-          check openssl-util          "证书命令行"
-          check kmod-ramoops          "崩溃现场保留（pstore/ramoops，设备树已留 1 MiB）"
+          done < <(tr -d '\r' < "$LIST")
+          echo "--- 清单共 $total 项 / 声明 $expect 项（.config 侧已校验）---"
+          [[ "$total" == "$expect" ]] || { echo "::error::清单条数 $total 与声明 $expect 不符（增删条目要同步改 #expect=）"; fail=1; }
+          [[ $total -ge 30 ]] || { echo "::error::清单只读到 $total 项，疑似被截断或格式错误"; fail=1; }
 
           echo "--- ttyd 依赖校验：必须是 libwebsockets-full（带 LIBUV）---"
           # ttyd 1.7.7 的 CMakeLists.txt:64 硬性要求 LWS_WITH_LIBUV，只有 full 变体编了这个。
@@ -199,10 +184,15 @@ jobs:
           # lws master 的 5.1.0 改了 external event loop，与 ttyd 的 uvwasi 主循环不兼容：
           # 设备实测起动 9ms 后 lws_context_destroy、exit_code 0、procd 无限重启。
           # prepare.sh 用 ppe/pkgs/libwebsockets/Makefile 覆盖成 24.10 的 4.3.3。
-          if grep -q '^PKG_VERSION:=4\.3\.3' feeds/packages/libs/libwebsockets/Makefile 2>/dev/null; then
-            echo "OK   libwebsockets 4.3.3"
+          LWS_MK=feeds/packages/libs/libwebsockets/Makefile
+          if [[ ! -f "$LWS_MK" ]]; then
+            echo "::error::找不到 $LWS_MK（feeds 布局变了，断言失效）—— libs 下实际内容："
+            ls -l feeds/packages/libs | head -20
+            fail=1
+          elif ! grep -q '^PKG_VERSION:=4\.3\.3' "$LWS_MK"; then
+            echo "::error::libwebsockets 不是 4.3.3（实际 $(grep -m1 '^PKG_VERSION:=' "$LWS_MK")），prepare.sh 的钉版未生效，ttyd 会启动即崩"; fail=1
           else
-            echo "::error::libwebsockets 不是 4.3.3（prepare.sh 的钉版未生效），ttyd 会启动即崩"; fail=1
+            echo "OK   libwebsockets 4.3.3"
           fi
 
           echo "--- 互斥项：dnsmasq 三个变体抢同一组文件 ---"
@@ -307,6 +297,20 @@ jobs:
           # 然后一路走到"产物归集"才以 glob=0 的形式暴露，且失败诊断/日志上传因 success 被跳过。
           set -o pipefail
           export CCACHE_CONFIGPATH=/tmp/ccache.conf
+
+          # ---- 早失败：单独先编 libwebsockets ----
+          # lws 三次失败全在它自己身上（Makefile 缩进、CMake 版本断言、钉版失效），
+          # 而它排在包阶段靠后位置，一失败就要等满 60 分钟。先单独编它：
+          # 依赖（toolchain/openssl/libuv）在这一步一并构建，随后完整 make 直接复用，
+          # 总时长基本不变，但 lws 出问题能在半小时内暴露。
+          echo "===== 预编 libwebsockets（早失败）====="
+          pre=0
+          make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee /tmp/build-lws.log || pre=$?
+          if [[ $pre -ne 0 ]]; then
+            echo "::error::libwebsockets 预编失败（configure/编译阶段），本轮在完整编译前中止"
+            exit $pre
+          fi
+          echo "===== 预编通过，开始完整编译 ====="
 
           echo "===== 第 1 轮：并行编译 ====="
           rc=0
@@ -456,12 +460,68 @@ jobs:
           fi
 
           mkdir -p ../out
+          echo "--- manifest 末态校验：清单里的包必须真进了镜像 ---"
+          # manifest 的行是 `<name> - <version>`（实测 237 行，如 `ttyd - 1.7.7-r1`），
+          # 所以整行精确匹配（grep -qx）永远不中；带 ABI 的库在 manifest 里还带数字后缀
+          # （实测 libwebsockets-full -> libwebsockets-full23），故按「包名 + 纯数字后缀」容错。
+          # 分级：hard 缺包 → 判失败，产物不落地；soft 缺包 → 只告警，照常上传，缺失写进 out/MISSING-SOFT.txt。
+          LIST=../ppe/scripts/required-packages.txt
+          expect=$(grep -m1 -o '^#expect=[0-9][0-9]*' "$LIST" | cut -d= -f2)
+          forbid=$(grep -m1 -o '^#forbid=[^[:space:]]*' "$LIST" | cut -d= -f2)
+          total=0; hard_missing=0; soft_missing=0; soft_lines=""
+          dups=$(tr -d '\r' < "$LIST" | grep -v '^#' | cut -f1 | grep -v '^$' | sort | uniq -d | tr '\n' ' ')
+          if [[ -n "$dups" ]]; then
+            echo "::error::清单里有重复条目：$dups"; hard_missing=1
+          fi
+          while IFS=$'\t' read -r pkg grade desc; do
+            case "$pkg" in ''|'#'*) continue ;; esac
+            total=$((total+1))
+            case "$grade" in
+              hard|soft) ;;
+              *) echo "::error::清单级别非法（只许 hard/soft）：$pkg => '${grade}'"; hard_missing=1; continue ;;
+            esac
+            if awk -v p="$pkg" '{ s = substr($1, length(p) + 1); if ($1 == p || (index($1, p) == 1 && s ~ /^[0-9]+$/)) f = 1 } END { exit(f ? 0 : 1) }' "${manifests[0]}"; then
+              continue
+            fi
+            if [[ "$grade" == hard ]]; then
+              echo "::error::manifest 里没有硬依赖 $pkg（$desc）"; hard_missing=1
+            else
+              echo "::warning::manifest 里没有 $pkg（$desc），不阻断上传"; soft_missing=$((soft_missing+1))
+              soft_lines="${soft_lines}${pkg}	${desc}"$'\n'
+            fi
+          done < <(tr -d '\r' < "$LIST")
+          if (( total < 30 )); then
+            echo "::error::清单只读到 $total 项，疑似被截断或格式错误"; exit 1
+          fi
+          if [[ -n "$expect" && "$total" != "$expect" ]]; then
+            echo "::error::清单条数 $total 与声明 $expect 不符"; hard_missing=1
+          fi
+          # 末态还要断言「没装错变体」：.config 里选的对，镜像里仍可能装成别的变体，
+          # run 46110723733 就是 libwebsockets-openssl 混进来把 ttyd 编死。
+          for bad in ${forbid//,/ }; do
+            if awk -v p="$bad" '{ s = substr($1, length(p) + 1); if ($1 == p || (index($1, p) == 1 && s ~ /^[0-9]+$/)) f = 1 } END { exit(f ? 0 : 1) }' "${manifests[0]}"; then
+              echo "::error::manifest 里出现了禁止的变体 $bad"; hard_missing=1
+            fi
+          done
+          if (( soft_missing )); then
+            printf '%s' "$soft_lines" > ../out/MISSING-SOFT.txt
+            echo "::warning::manifest 缺 soft 依赖 $soft_missing 项，明细见 out/MISSING-SOFT.txt，不阻断上传"
+            echo "小计：$total 项 = hard 全在 + soft 缺 $soft_missing"
+          elif (( hard_missing == 0 )); then
+            echo "OK   清单 $total 项在 manifest 里全部命中（hard 与 soft 都在）"
+          fi
+          if (( hard_missing )); then
+            echo "--- manifest 实际内容（前 40 行）---"
+            head -40 "${manifests[0]}"
+            exit 1
+          fi
           python3 ../ppe/scripts/check-stock-image.py "${upgrades[0]}" "${factories[0]}" \
             | tee ../out/IMAGE-AUDIT.md
           cp "${factories[0]}" ../out/AX6-ppe-nss-factory.ubi
           cp "${upgrades[0]}"  ../out/AX6-ppe-nss-sysupgrade.bin
           cp "${manifests[0]}" ../out/AX6-ppe-nss.manifest
           cp .config ../out/build.config
+          cp ../ppe/scripts/required-packages.txt ../out/required-packages.txt
           cp ../out/IMAGE-AUDIT.md ../out/AX6-ppe-nss-IMAGE-AUDIT.md
           echo 'EXPERIMENTAL - 未在真机验证 PPE/NSS 转发、WiFi、boot 与回滚。' > ../out/UNVERIFIED.txt
           case "${FULLCONE:-kept}" in

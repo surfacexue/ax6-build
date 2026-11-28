@@ -47,6 +47,13 @@ include $(INCLUDE_DIR)/cmake.mk
 
 CMAKE_OPTIONS += -DLWS_IPV6=$(if $(CONFIG_IPV6),ON,OFF)
 CMAKE_OPTIONS += -DDISABLE_WERROR=ON
+# 2026-11-28：GitHub runner 的 CMake 已升到 4.x。4.x 移除了对 cmake_minimum_required(<3.5)
+# 的兼容，而 lws 4.3.3 的 CMakeLists.txt:25 声明的下限是 2.8.12，configure 直接报
+#   Compatibility with CMake < 3.5 has been removed from CMake.
+# run 46121307698 实测失败点就在这里（不是 gcc-14：configure 0.04 秒即死，编译器未被调用）。
+# CMAKE_POLICY_VERSION_MINIMUM 是 CMake 在报错里给出的官方逃生口；
+# 只在 CMake 4.x 上生效，3.x 下仅多一条「未使用变量」告警。
+CMAKE_OPTIONS += -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 CMAKE_OPTIONS += -DCMAKE_BUILD_TYPE=Release
 CMAKE_OPTIONS += -DLWS_WITH_EXTERNAL_POLL=ON
 CMAKE_OPTIONS += -DLWS_WITH_ULOOP=ON
