@@ -209,12 +209,12 @@ for feed in feeds/luci feeds/packages feeds/nss; do
 done
 echo "immortalwrt/luci $(cat ./LUCI-SHA.txt)"
 echo 'fullconenat-nft 来自本仓库 ppe/pkgs/（源码 07d93b6 + ImmortalWrt 的两份补丁）'
-echo '===== 7/7 注入 files/ 覆盖（默认值修正 + pstore 转存）====='
+echo '===== 7/7 注入 files/ 覆盖（默认值修正）====='
 if [[ -d ../ppe/files ]]; then
   mkdir -p files
   cp -a ../ppe/files/. files/
-  # Windows 检出常丢可执行位，这里显式补回，否则 rc.local 与 uci-defaults 不执行
-  chmod 755 files/etc/rc.local 2>/dev/null || true
+  # Windows 检出常丢可执行位，这里显式补回，否则 uci-defaults 不执行
+  # （rc.local 不再注入：pstore 归档由 base-files 自带的 /etc/init.d/pstore-archive 负责）
   chmod 755 files/etc/uci-defaults/* 2>/dev/null || true
   echo "OK: 已注入 files/（$(find files -type f | wc -l) 个文件）"
   find files -type f | sed 's/^/    /'

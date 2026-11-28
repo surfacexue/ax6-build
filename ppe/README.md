@@ -284,8 +284,11 @@ uci commit firewall
 
 加 `CONFIG_PACKAGE_kmod-ramoops=y`（依赖自动拉 `kmod-pstore` + `kmod-reed-solomon`，
 KCONFIG 带 `CONFIG_PSTORE` / `_CONSOLE` / `_RAM`）。
-`files/etc/rc.local` 每次启动挂 pstore，有内容就追加到 `/etc/pstore-archive/last-crash.log`
-（超过 200 KB 只留尾部），然后清空 pstore，避免同一条记录反复累积。
+
+归档不用自己写：base-files 自带 `/etc/init.d/pstore-archive`，启动时挂 pstore →
+转存到 `/root/pstore/<时间>-<boot_id>/` → 清空 → 保留 20 份。
+v2 里额外写的 `files/etc/rc.local` 与之重复（路径还不一致，写的是 `/etc/pstore-archive`），
+且 `rm -f /sys/fs/pstore/*` 有抢先删掉现场的风险，v4 已删除。
 
 ### 4. 补三个命令行工具
 
@@ -295,7 +298,8 @@ KCONFIG 带 `CONFIG_PSTORE` / `_CONSOLE` / `_RAM`）。
 ### 5. `prepare.sh` 加 7/7 步
 
 把 `../ppe/files/` 复制到源码树 `files/`，并 `chmod 755` 补回 Windows 检出丢掉的可执行位
-（否则 `rc.local` 和 `uci-defaults` 不会执行，改了等于没改）。
+（否则 `uci-defaults` 不会执行，改了等于没改）。当前 `files/` 里只有
+`etc/uci-defaults/90-ax6-defaults` 一个文件。
 
 ### 这一版**没**动的
 
