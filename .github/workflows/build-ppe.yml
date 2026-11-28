@@ -160,6 +160,7 @@ jobs:
           check sing-box-tiny         "代理内核（已去掉 QUIC/gVisor）"
           check kmod-nft-tproxy       "HomeProxy 透明代理"
           check ucode-mod-digest      "HomeProxy 依赖的 ucode digest"
+          check ttyd                 "网页终端的守护进程本体"
           check luci-app-ttyd         "网页终端"
           check luci-app-ddns         "动态 DNS 界面（v3 增补）"
           check luci-i18n-ddns-zh-cn  "动态 DNS 中文语言包"
@@ -286,6 +287,9 @@ jobs:
       - name: 编译固件
         working-directory: ppe-source
         run: |
+          # 必须开 pipefail：`make ... | tee` 的退出码是 tee 的，make 失败会被吞成 success，
+          # 然后一路走到"产物归集"才以 glob=0 的形式暴露，且失败诊断/日志上传因 success 被跳过。
+          set -o pipefail
           export CCACHE_CONFIGPATH=/tmp/ccache.conf
           make -j"$(nproc)" V=s 2>&1 | tee /tmp/build.log
 
@@ -299,6 +303,15 @@ jobs:
           echo "===== 关键错误 ====="
           grep -nE "error:|Error [0-9]|ERROR:|No space left|Killed|make.*\*\*\*|undefined reference|missing dependencies|Conflicts|failed to build" "$LOG" \
             | tail -50 || echo "(未匹配)"
+          # 关键行塞进 annotation：私有仓库的 job 日志要登录才能看，
+          # 但 annotations 通过 API 免登录可读，出问题时不必人工贴日志。
+          msg=$(grep -nE "error:|Error [0-9]|\*\*\*|missing dependencies|failed to build" "$LOG" \
+            | tail -15 | sed 's/%/%25/g; s/\r//g' | tr '\n' '%0A')
+          if [[ -n "$msg" ]]; then
+            echo "::error::构建失败关键行（完整日志见 artifact ppe-build-log-${GITHUB_RUN_ID}）：%0A${msg}"
+          else
+            echo "::error::构建失败但未匹配到关键字，完整日志见 artifact ppe-build-log-${GITHUB_RUN_ID}"
+          fi
 
       - name: 上传编译日志（仅失败时）
         if: failure() || cancelled()
@@ -317,9 +330,14 @@ jobs:
           factories=("$TARGET"/*redmi_ax6-stock*squashfs-factory.ubi)
           upgrades=("$TARGET"/*redmi_ax6-stock*squashfs-sysupgrade.bin)
           manifests=("$TARGET"/*redmi_ax6-stock*.manifest)
-          echo "factory=${#factories[@]} sysupgrade=${#upgrades[@]} manifest=${#manifests[@]}"
-          (( ${#factories[@]} == 1 && ${#upgrades[@]} == 1 && ${#manifests[@]} == 1 )) || {
-            echo "::error::产物不唯一，检查设备定义"; ls -la "$TARGET" | head -30; exit 1; }
+          counts="factory=${#factories[@]} sysupgrade=${#upgrades[@]} manifest=${#manifests[@]}"
+          echo "$counts"
+          if (( ${#factories[@]} != 1 || ${#upgrades[@]} != 1 || ${#manifests[@]} != 1 )); then
+            ls -la "$TARGET" | head -40
+            detail=$(ls -la "$TARGET" | head -40 | sed 's/%/%25/g; s/\r//g' | tr '\n' '%0A')
+            echo "::error::产物不唯一（${counts}）%0A${detail}"
+            exit 1
+          fi
 
           mkdir -p ../out
           python3 ../ppe/scripts/check-stock-image.py "${upgrades[0]}" "${factories[0]}" \
