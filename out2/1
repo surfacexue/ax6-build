@@ -1,0 +1,387 @@
+From 68edcbab554987a8317948401f99ed34861f0922 Mon Sep 17 00:00:00 2001
+From: penguin <agent@penguin>
+Date: Sat, 28 Nov 2026 16:56:33 +0800
+Subject: [PATCH] =?UTF-8?q?fix(ci):=20=E9=A2=84=E7=BC=96=E6=97=A5=E5=BF=97?=
+ =?UTF-8?q?=E5=86=99=20/tmp/build.log=EF=BC=9B=E8=AF=8A=E6=96=AD/=E4=B8=8A?=
+ =?UTF-8?q?=E4=BC=A0/=E5=8F=91=E5=B8=83=E4=B8=89=E5=A4=84=E5=8A=A0=20build?=
+ =?UTF-8?q?-lws=20=E5=85=9C=E5=BA=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+run 46127565116 在预编 libwebsockets 阶段失败（08:49Z 起跑，08:54:33Z 结束），
+日志一手都没留下：预编 tee 写的是 /tmp/build-lws.log，而失败诊断、上传编译日志、
+发布到 logs 分支三处只认 /tmp/build.log，失败报告于是只有 16 行「无构建日志」。
+
+- 预编直接 tee /tmp/build.log，另存一份 build-lws.log
+- 失败诊断按 build.log → build-lws.log → build_serial.log 取第一个非空
+- 上传 artifact 三个日志都带上
+- 发布失败日志同样三级兜底
+---
+ .github/workflows/build-ppe.yml |  22 ++-
+ out/1                           | 298 ++++++++++++++++++++++++++++++++
+ 2 files changed, 315 insertions(+), 5 deletions(-)
+ create mode 100644 out/1
+
+diff --git a/.github/workflows/build-ppe.yml b/.github/workflows/build-ppe.yml
+index 938fd03..7619ed4 100644
+--- a/.github/workflows/build-ppe.yml
++++ b/.github/workflows/build-ppe.yml
+@@ -305,9 +305,13 @@ jobs:
+           # 总时长基本不变，但 lws 出问题能在半小时内暴露。
+           echo "===== 预编 libwebsockets（早失败）====="
+           pre=0
+-          make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee /tmp/build-lws.log || pre=$?
++          # 日志必须写到 /tmp/build.log：失败诊断、上传日志、logs 分支三处都只认这个文件名。
++          # run 46127565116 就是在这丢了日志 —— 预编写 /tmp/build-lws.log，诊断读 build.log，
++          # 结果失败后只有 16 行"没有日志"的摘要，真实错误一个字都没留下。
++          make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee /tmp/build.log || pre=$?
++          cp /tmp/build.log /tmp/build-lws.log || true
+           if [[ $pre -ne 0 ]]; then
+-            echo "::error::libwebsockets 预编失败（configure/编译阶段），本轮在完整编译前中止"
++            echo "::error::libwebsockets 预编失败（configure/编译阶段），本轮在完整编译前中止；完整日志见 /tmp/build.log"
+             exit $pre
+           fi
+           echo "===== 预编通过，开始完整编译 ====="
+@@ -341,8 +345,12 @@ jobs:
+       - name: 失败诊断
+         if: failure() || cancelled()
+         run: |
+-          LOG=/tmp/build.log
+-          [[ -f "$LOG" ]] || { echo "(无构建日志)"; exit 0; }
++          LOG=""
++          for f in /tmp/build.log /tmp/build-lws.log /tmp/build_serial.log; do
++            [[ -s "$f" ]] && { LOG=$f; break; }
++          done
++          [[ -n "$LOG" ]] || { echo "(无构建日志：/tmp/build.log、build-lws.log、build_serial.log 都不存在)"; exit 0; }
++          echo "诊断读取：$LOG"
+           echo "===== 日志规模 ====="; wc -l "$LOG" || true
+ 
+           echo "===== 日志尾部 60 行 ====="
+@@ -384,7 +392,10 @@ jobs:
+         uses: actions/upload-artifact@v4
+         with:
+           name: ppe-build-log-${{ github.run_id }}
+-          path: /tmp/build.log
++          path: |
++            /tmp/build.log
++            /tmp/build-lws.log
++            /tmp/build_serial.log
+           if-no-files-found: ignore
+           retention-days: 7
+ 
+@@ -396,6 +407,7 @@ jobs:
+         run: |
+           set +e
+           LOG=/tmp/build.log
++          [ -s "$LOG" ] || LOG=/tmp/build-lws.log
+           [ -s "$LOG" ] || LOG=/tmp/build_serial.log
+           R=/tmp/failure-report.txt
+           {
+diff --git a/out/1 b/out/1
+new file mode 100644
+index 0000000..9c89fad
+--- /dev/null
++++ b/out/1
+@@ -0,0 +1,298 @@
++From 132265d454d3d84ee1c5d5d88be89a01d345313d Mon Sep 17 00:00:00 2001
++From: penguin <agent@penguin>
++Date: Sat, 28 Nov 2026 16:44:25 +0800
++Subject: [PATCH] =?UTF-8?q?ci:=20lws=20=E9=92=89=E7=89=88=E5=85=BC?=
++ =?UTF-8?q?=E5=AE=B9=20CMake=204=EF=BC=9B=E5=BF=85=E8=A3=85=E5=8C=85?=
++ =?UTF-8?q?=E6=B8=85=E5=8D=95=E5=8D=95=E4=B8=80=E7=9C=9F=E6=BA=90=20+=20ma?=
++ =?UTF-8?q?nifest=20=E6=9C=AB=E6=80=81=E6=A0=A1=E9=AA=8C?=
++MIME-Version: 1.0
++Content-Type: text/plain; charset=UTF-8
++Content-Transfer-Encoding: 8bit
++
++libwebsockets（run 46121307698 的失败点，不是 gcc-14）：
++- ppe/pkgs/libwebsockets/Makefile 加 -DCMAKE_POLICY_VERSION_MINIMUM=3.5。
++  CMake 4.x 移除了对 cmake_minimum_required(<3.5) 的兼容，lws 4.3.3 声明 2.8.12，
++  configure 0.04 秒即 FATAL，编译器一次都没被调用。
++- 编译前先单独编 libwebsockets（早失败）：lws 出问题 4 分钟暴露，不必等到包阶段末尾。
++
++校验（清单唯一真源）：
++- 新增 ppe/scripts/required-packages.txt，35 项（12 hard / 23 soft），含 #expect=35 与 #forbid 两个机器读行。
++- 前置「校验核心功能包」改读清单，级别枚举不合法即失败，条数须等于 #expect。
++- 「校验并归集产物」新增 manifest 末态校验：hard 缺包 exit 1（产物不落地）；
++  soft 缺包只告警，写 out/MISSING-SOFT.txt 随产物上传；#forbid 里的变体出现即失败。
++- manifest 行按行首匹配并容忍 ABI 数字后缀（libwebsockets-full -> libwebsockets-full23）。
++- libwebsockets 断言区分「找不到 Makefile」与「版本不对」，各给不同报错。
++---
++ .github/workflows/build-ppe.yml   | 144 +++++++++++++++++++++---------
++ ppe/pkgs/libwebsockets/Makefile   |   7 ++
++ ppe/scripts/required-packages.txt |  55 ++++++++++++
++ 3 files changed, 164 insertions(+), 42 deletions(-)
++ create mode 100644 ppe/scripts/required-packages.txt
++
++diff --git a/.github/workflows/build-ppe.yml b/.github/workflows/build-ppe.yml
++index e4dcc0a..938fd03 100644
++--- a/.github/workflows/build-ppe.yml
+++++ b/.github/workflows/build-ppe.yml
++@@ -141,47 +141,32 @@ jobs:
++         run: |
++           set -e
++           fail=0
++-          check() {
++-            if grep -qx "CONFIG_PACKAGE_$1=y" .config; then
++-              echo "OK   $1"
+++          # 必装包清单的唯一真源：ppe/scripts/required-packages.txt
+++          # 本步查 .config（包被“选中”，1–2 分钟就失败）；同一份清单在「校验并归集产物」里
+++          # 还会再查一次 manifest（包真“进了镜像”）。加包只改那一份文件，别在本文件再抄一份。
+++          # 本步不区分 hard/soft：此刻还没编译，缺任何一条都该立刻停，早失败零浪费。
+++          LIST=../ppe/scripts/required-packages.txt
+++          [[ -f "$LIST" ]] || { echo "::error::缺少必装包清单 $LIST"; exit 1; }
+++          # 条数由清单自己声明（#expect=N），清单缩短时只改数据，不改 workflow。
+++          expect=$(grep -m1 -o '^#expect=[0-9][0-9]*' "$LIST" | cut -d= -f2)
+++          [[ -n "$expect" ]] || { echo "::error::清单缺 #expect=N 行，无法核对条数"; exit 1; }
+++          total=0
+++          while IFS=$'\t' read -r pkg grade desc; do
+++            case "$pkg" in ''|'#'*) continue ;; esac
+++            total=$((total+1))
+++            case "$grade" in
+++              hard|soft) ;;
+++              *) echo "::error::清单级别非法（只许 hard/soft）：$pkg => '${grade}'"; fail=1; continue ;;
+++            esac
+++            if grep -qxF "CONFIG_PACKAGE_${pkg}=y" .config; then
+++              echo "OK   $pkg"
++             else
++-              echo "::error::缺少 $1（$2）"; fail=1
+++              echo "::error::缺少 $pkg（$desc）"; fail=1
++             fi
++-          }
++-          check kmod-nss-wifi-drv     "NSS WiFi 驱动"
++-          check nss-firmware-ipq807x  "NSS 固件 blob"
++-          check kmod-wireguard        "WireGuard 内核模块"
++-          check wireguard-tools       "wg 用户态"
++-          check luci-proto-wireguard  "LuCI WireGuard 页面"
++-          check kmod-tun              "tailscale 依赖的 TUN"
++-          check tailscale             "tailscale"
++-          check luci-ssl              "HTTPS 管理页"
++-          check luci-theme-argon      "Argon 主题"
++-          check firewall4             "fw4"
++-          check luci-app-homeproxy    "代理界面（ImmortalWrt luci，prepare.sh 3/6）"
++-          check sing-box-tiny         "代理内核（已去掉 QUIC/gVisor）"
++-          check kmod-nft-tproxy       "HomeProxy 透明代理"
++-          check ucode-mod-digest      "HomeProxy 依赖的 ucode digest"
++-          check ttyd                 "网页终端的守护进程本体"
++-          check luci-app-ttyd         "网页终端"
++-          check luci-app-ddns         "动态 DNS 界面（v3 增补）"
++-          check luci-i18n-ddns-zh-cn  "动态 DNS 中文语言包"
++-          check luci-app-wol          "网络唤醒界面（发魔术包）"
++-          check luci-i18n-wol-zh-cn   "网络唤醒中文语言包"
++-          check etherwake             "luci-app-wol 的硬依赖（LUCI_DEPENDS:=+etherwake）"
++-          check luci-app-filemanager  "文件管理"
++-          check luci-app-upnp         "UPnP 界面"
++-          check miniupnpd-nftables    "UPnP 守护进程（nftables 变体）"
++-          check kmod-nft-fullcone     "FullCone NAT 内核模块（ppe/pkgs）"
++-          check luci-app-fullcone     "FullCone 的 LuCI 页（ppe/pkgs）"
++-          check nftables-json         "nftables（带 fullcone 表达式补丁）"
++-          check luci-app-adblock-fast "广告过滤界面"
++-          check adblock-fast          "广告过滤服务"
++-          check dnsmasq-full          "adblock-fast 的 nftset 后端（普通变体不编 HAVE_NFTSET）"
++-          check iperf3                "压测工具（换机现场没网，必须预装）"
++-          check tcpdump               "抓包工具（无 WAN 时装不了）"
++-          check openssl-util          "证书命令行"
++-          check kmod-ramoops          "崩溃现场保留（pstore/ramoops，设备树已留 1 MiB）"
+++          done < <(tr -d '\r' < "$LIST")
+++          echo "--- 清单共 $total 项 / 声明 $expect 项（.config 侧已校验）---"
+++          [[ "$total" == "$expect" ]] || { echo "::error::清单条数 $total 与声明 $expect 不符（增删条目要同步改 #expect=）"; fail=1; }
+++          [[ $total -ge 30 ]] || { echo "::error::清单只读到 $total 项，疑似被截断或格式错误"; fail=1; }
++ 
++           echo "--- ttyd 依赖校验：必须是 libwebsockets-full（带 LIBUV）---"
++           # ttyd 1.7.7 的 CMakeLists.txt:64 硬性要求 LWS_WITH_LIBUV，只有 full 变体编了这个。
++@@ -199,10 +184,15 @@ jobs:
++           # lws master 的 5.1.0 改了 external event loop，与 ttyd 的 uvwasi 主循环不兼容：
++           # 设备实测起动 9ms 后 lws_context_destroy、exit_code 0、procd 无限重启。
++           # prepare.sh 用 ppe/pkgs/libwebsockets/Makefile 覆盖成 24.10 的 4.3.3。
++-          if grep -q '^PKG_VERSION:=4\.3\.3' feeds/packages/libs/libwebsockets/Makefile 2>/dev/null; then
++-            echo "OK   libwebsockets 4.3.3"
+++          LWS_MK=feeds/packages/libs/libwebsockets/Makefile
+++          if [[ ! -f "$LWS_MK" ]]; then
+++            echo "::error::找不到 $LWS_MK（feeds 布局变了，断言失效）—— libs 下实际内容："
+++            ls -l feeds/packages/libs | head -20
+++            fail=1
+++          elif ! grep -q '^PKG_VERSION:=4\.3\.3' "$LWS_MK"; then
+++            echo "::error::libwebsockets 不是 4.3.3（实际 $(grep -m1 '^PKG_VERSION:=' "$LWS_MK")），prepare.sh 的钉版未生效，ttyd 会启动即崩"; fail=1
++           else
++-            echo "::error::libwebsockets 不是 4.3.3（prepare.sh 的钉版未生效），ttyd 会启动即崩"; fail=1
+++            echo "OK   libwebsockets 4.3.3"
++           fi
++ 
++           echo "--- 互斥项：dnsmasq 三个变体抢同一组文件 ---"
++@@ -308,6 +298,20 @@ jobs:
++           set -o pipefail
++           export CCACHE_CONFIGPATH=/tmp/ccache.conf
++ 
+++          # ---- 早失败：单独先编 libwebsockets ----
+++          # lws 三次失败全在它自己身上（Makefile 缩进、CMake 版本断言、钉版失效），
+++          # 而它排在包阶段靠后位置，一失败就要等满 60 分钟。先单独编它：
+++          # 依赖（toolchain/openssl/libuv）在这一步一并构建，随后完整 make 直接复用，
+++          # 总时长基本不变，但 lws 出问题能在半小时内暴露。
+++          echo "===== 预编 libwebsockets（早失败）====="
+++          pre=0
+++          make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee /tmp/build-lws.log || pre=$?
+++          if [[ $pre -ne 0 ]]; then
+++            echo "::error::libwebsockets 预编失败（configure/编译阶段），本轮在完整编译前中止"
+++            exit $pre
+++          fi
+++          echo "===== 预编通过，开始完整编译 ====="
+++
++           echo "===== 第 1 轮：并行编译 ====="
++           rc=0
++           make -j"$(nproc)" V=s 2>&1 | tee /tmp/build.log || rc=$?
++@@ -456,12 +460,68 @@ jobs:
++           fi
++ 
++           mkdir -p ../out
+++          echo "--- manifest 末态校验：清单里的包必须真进了镜像 ---"
+++          # manifest 的行是 `<name> - <version>`（实测 237 行，如 `ttyd - 1.7.7-r1`），
+++          # 所以整行精确匹配（grep -qx）永远不中；带 ABI 的库在 manifest 里还带数字后缀
+++          # （实测 libwebsockets-full -> libwebsockets-full23），故按「包名 + 纯数字后缀」容错。
+++          # 分级：hard 缺包 → 判失败，产物不落地；soft 缺包 → 只告警，照常上传，缺失写进 out/MISSING-SOFT.txt。
+++          LIST=../ppe/scripts/required-packages.txt
+++          expect=$(grep -m1 -o '^#expect=[0-9][0-9]*' "$LIST" | cut -d= -f2)
+++          forbid=$(grep -m1 -o '^#forbid=[^[:space:]]*' "$LIST" | cut -d= -f2)
+++          total=0; hard_missing=0; soft_missing=0; soft_lines=""
+++          dups=$(tr -d '\r' < "$LIST" | grep -v '^#' | cut -f1 | grep -v '^$' | sort | uniq -d | tr '\n' ' ')
+++          if [[ -n "$dups" ]]; then
+++            echo "::error::清单里有重复条目：$dups"; hard_missing=1
+++          fi
+++          while IFS=$'\t' read -r pkg grade desc; do
+++            case "$pkg" in ''|'#'*) continue ;; esac
+++            total=$((total+1))
+++            case "$grade" in
+++              hard|soft) ;;
+++              *) echo "::error::清单级别非法（只许 hard/soft）：$pkg => '${grade}'"; hard_missing=1; continue ;;
+++            esac
+++            if awk -v p="$pkg" '{ s = substr($1, length(p) + 1); if ($1 == p || (index($1, p) == 1 && s ~ /^[0-9]+$/)) f = 1 } END { exit(f ? 0 : 1) }' "${manifests[0]}"; then
+++              continue
+++            fi
+++            if [[ "$grade" == hard ]]; then
+++              echo "::error::manifest 里没有硬依赖 $pkg（$desc）"; hard_missing=1
+++            else
+++              echo "::warning::manifest 里没有 $pkg（$desc），不阻断上传"; soft_missing=$((soft_missing+1))
+++              soft_lines="${soft_lines}${pkg}	${desc}"$'\n'
+++            fi
+++          done < <(tr -d '\r' < "$LIST")
+++          if (( total < 30 )); then
+++            echo "::error::清单只读到 $total 项，疑似被截断或格式错误"; exit 1
+++          fi
+++          if [[ -n "$expect" && "$total" != "$expect" ]]; then
+++            echo "::error::清单条数 $total 与声明 $expect 不符"; hard_missing=1
+++          fi
+++          # 末态还要断言「没装错变体」：.config 里选的对，镜像里仍可能装成别的变体，
+++          # run 46110723733 就是 libwebsockets-openssl 混进来把 ttyd 编死。
+++          for bad in ${forbid//,/ }; do
+++            if awk -v p="$bad" '{ s = substr($1, length(p) + 1); if ($1 == p || (index($1, p) == 1 && s ~ /^[0-9]+$/)) f = 1 } END { exit(f ? 0 : 1) }' "${manifests[0]}"; then
+++              echo "::error::manifest 里出现了禁止的变体 $bad"; hard_missing=1
+++            fi
+++          done
+++          if (( soft_missing )); then
+++            printf '%s' "$soft_lines" > ../out/MISSING-SOFT.txt
+++            echo "::warning::manifest 缺 soft 依赖 $soft_missing 项，明细见 out/MISSING-SOFT.txt，不阻断上传"
+++            echo "小计：$total 项 = hard 全在 + soft 缺 $soft_missing"
+++          elif (( hard_missing == 0 )); then
+++            echo "OK   清单 $total 项在 manifest 里全部命中（hard 与 soft 都在）"
+++          fi
+++          if (( hard_missing )); then
+++            echo "--- manifest 实际内容（前 40 行）---"
+++            head -40 "${manifests[0]}"
+++            exit 1
+++          fi
++           python3 ../ppe/scripts/check-stock-image.py "${upgrades[0]}" "${factories[0]}" \
++             | tee ../out/IMAGE-AUDIT.md
++           cp "${factories[0]}" ../out/AX6-ppe-nss-factory.ubi
++           cp "${upgrades[0]}"  ../out/AX6-ppe-nss-sysupgrade.bin
++           cp "${manifests[0]}" ../out/AX6-ppe-nss.manifest
++           cp .config ../out/build.config
+++          cp ../ppe/scripts/required-packages.txt ../out/required-packages.txt
++           cp ../out/IMAGE-AUDIT.md ../out/AX6-ppe-nss-IMAGE-AUDIT.md
++           echo 'EXPERIMENTAL - 未在真机验证 PPE/NSS 转发、WiFi、boot 与回滚。' > ../out/UNVERIFIED.txt
++           case "${FULLCONE:-kept}" in
++diff --git a/ppe/pkgs/libwebsockets/Makefile b/ppe/pkgs/libwebsockets/Makefile
++index 44a4709..12e963b 100644
++--- a/ppe/pkgs/libwebsockets/Makefile
+++++ b/ppe/pkgs/libwebsockets/Makefile
++@@ -47,6 +47,13 @@ include $(INCLUDE_DIR)/cmake.mk
++ 
++ CMAKE_OPTIONS += -DLWS_IPV6=$(if $(CONFIG_IPV6),ON,OFF)
++ CMAKE_OPTIONS += -DDISABLE_WERROR=ON
+++# 2026-11-28：GitHub runner 的 CMake 已升到 4.x。4.x 移除了对 cmake_minimum_required(<3.5)
+++# 的兼容，而 lws 4.3.3 的 CMakeLists.txt:25 声明的下限是 2.8.12，configure 直接报
+++#   Compatibility with CMake < 3.5 has been removed from CMake.
+++# run 46121307698 实测失败点就在这里（不是 gcc-14：configure 0.04 秒即死，编译器未被调用）。
+++# CMAKE_POLICY_VERSION_MINIMUM 是 CMake 在报错里给出的官方逃生口；
+++# 只在 CMake 4.x 上生效，3.x 下仅多一条「未使用变量」告警。
+++CMAKE_OPTIONS += -DCMAKE_POLICY_VERSION_MINIMUM=3.5
++ CMAKE_OPTIONS += -DCMAKE_BUILD_TYPE=Release
++ CMAKE_OPTIONS += -DLWS_WITH_EXTERNAL_POLL=ON
++ CMAKE_OPTIONS += -DLWS_WITH_ULOOP=ON
++diff --git a/ppe/scripts/required-packages.txt b/ppe/scripts/required-packages.txt
++new file mode 100644
++index 0000000..e5197d4
++--- /dev/null
+++++ b/ppe/scripts/required-packages.txt
++@@ -0,0 +1,55 @@
+++# AX6 PPE-NSS 必装包清单（唯一真源）
+++#
+++# 为什么要有这个文件：同一份清单在两个时机用，语义不同，不能只留一份。
+++#   前置「校验核心功能包（缺失即中止）」：查 CONFIG_PACKAGE_<name>=y —— 证明包被「选中」，失败代价 1–2 分钟
+++#   后置「校验并归集产物」           ：查 <target>.manifest —— 证明包「真进了镜像」
+++# 两处都读本文件，加包只改这里一处；两份硬编码清单迟早漂移，那比没有校验更坏。
+++#
+++# 格式：`包名<TAB>hard|soft<TAB>说明`。空行与 # 开头为注释。
+++#   级别只对后置生效（前置全数中止，因为此时还没编译，早失败零浪费）：
+++#   hard = 缺了这轮固件不能组网 / 不能管理 / 不能远程救回 → ::error:: + exit 1，产物不落地
+++#   soft = 缺了只是少一个界面、语言包、可选功能或现场工具 → ::warning::，照常上传，缺失写进 out/MISSING-SOFT.txt
+++# 注意 1：manifest 行是 `<name> - <version>`，不是裸包名，必须按行首匹配。
+++# 注意 2：带 ABI 的库在 manifest 里带数字后缀（实测 libwebsockets-full -> libwebsockets-full23），
+++#         后置按「包名 + 纯数字后缀」容错；而 .config 里的 CONFIG_PACKAGE_ 名字不带后缀。
+++#
+++# 机器读的两行（改清单必须同步改第一行，否则 CI 直接失败）：
+++#expect=35
+++#forbid=libwebsockets-openssl,dnsmasq,dnsmasq-dhcpv6,sing-box
+++
+++# --- 无线与 NSS ---
+++kmod-nss-wifi-drv	hard	NSS WiFi 驱动（缺则无无线）
+++nss-firmware-ipq807x	hard	NSS 固件 blob（缺则驱动起不来）
+++kmod-nft-fullcone	hard	FullCone NAT 内核模块（ppe/pkgs）
+++nftables-json	hard	nftables（带 fullcone 表达式补丁，缺则 FullCone 规则加载失败）
+++firewall4	hard	fw4（缺则无 NAT / 无防火墙）
+++dnsmasq-full	hard	DHCP/DNS，且是 adblock-fast 的 nftset 后端（普通变体不编 HAVE_NFTSET）
+++ttyd	hard	网页终端本体（换机现场唯一的救急入口）
+++libwebsockets-full	hard	ttyd 1.7.7 需要 LWS_WITH_LIBUV，只有 full 变体编了（manifest 里带 ABI 后缀）
+++kmod-tun	hard	tailscale 依赖的 TUN
+++tailscale	hard	远程接入通道（换机后靠它进机器）
+++kmod-wireguard	hard	WireGuard 内核模块（备用远程通道）
+++wireguard-tools	hard	wg 用户态工具
+++luci-ssl	soft	HTTPS 管理页（缺则退回 http，仍能管理）
+++luci-theme-argon	soft	Argon 主题（缺则用默认主题）
+++luci-proto-wireguard	soft	LuCI WireGuard 页面（uci 仍可配）
+++luci-app-homeproxy	soft	代理界面（ImmortalWrt luci，prepare.sh 3/6）
+++sing-box-tiny	soft	代理内核（已去掉 QUIC/gVisor）
+++kmod-nft-tproxy	soft	HomeProxy 透明代理
+++ucode-mod-digest	soft	HomeProxy 依赖的 ucode digest
+++luci-app-ttyd	soft	网页终端的 LuCI 页（ttyd 本体在就能进）
+++luci-app-ddns	soft	动态 DNS 界面（v3 增补）
+++luci-i18n-ddns-zh-cn	soft	动态 DNS 中文语言包
+++luci-app-wol	soft	网络唤醒界面（发魔术包）
+++luci-i18n-wol-zh-cn	soft	网络唤醒中文语言包
+++etherwake	soft	luci-app-wol 的硬依赖（LUCI_DEPENDS:=+etherwake）
+++luci-app-filemanager	soft	文件管理
+++luci-app-upnp	soft	UPnP 界面
+++miniupnpd-nftables	soft	UPnP 守护进程（nftables 变体）
+++luci-app-fullcone	soft	FullCone 的 LuCI 页（内核模块在，uci 可开）
+++luci-app-adblock-fast	soft	广告过滤界面
+++adblock-fast	soft	广告过滤服务
+++iperf3	soft	压测工具（换机现场没网，必须预装）
+++tcpdump	soft	抓包工具（无 WAN 时装不了）
+++openssl-util	soft	证书命令行
+++kmod-ramoops	soft	崩溃现场保留（pstore/ramoops，设备树已留 1 MiB）
++-- 
++2.49.0.windows.1
++
+-- 
+2.49.0.windows.1
+

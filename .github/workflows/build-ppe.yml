@@ -303,15 +303,24 @@ jobs:
           # 而它排在包阶段靠后位置，一失败就要等满 60 分钟。先单独编它：
           # 依赖（toolchain/openssl/libuv）在这一步一并构建，随后完整 make 直接复用，
           # 总时长基本不变，但 lws 出问题能在半小时内暴露。
-          echo "===== 预编 libwebsockets（早失败）====="
+          echo "===== 预热：host tools + toolchain（预编 lws 的前提）====="
+          # run 46128137376 实测：直接 make package/.../libwebsockets/compile 会在
+          # 「host lua 编不过」这一步死（staging_dir/host/bin/sed: No such file or directory，
+          # Error 127）——因为 host 工具链还没建。这两步本来就是完整编译的前半段，
+          # 先做只是把顺序提上来，随后完整 make 会直接复用，总时长基本不变。
           pre=0
+          make -j"$(nproc)" tools/install 2>&1 | tee /tmp/build.log || pre=$?
+          if [[ $pre -eq 0 ]]; then
+            make -j"$(nproc)" toolchain/install 2>&1 | tee -a /tmp/build.log || pre=$?
+          fi
+          echo "===== 预编 libwebsockets（早失败）====="
           # 日志必须写到 /tmp/build.log：失败诊断、上传日志、logs 分支三处都只认这个文件名。
-          # run 46127565116 就是在这丢了日志 —— 预编写 /tmp/build-lws.log，诊断读 build.log，
-          # 结果失败后只有 16 行"没有日志"的摘要，真实错误一个字都没留下。
-          make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee /tmp/build.log || pre=$?
+          if [[ $pre -eq 0 ]]; then
+            make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee -a /tmp/build.log || pre=$?
+          fi
           cp /tmp/build.log /tmp/build-lws.log || true
           if [[ $pre -ne 0 ]]; then
-            echo "::error::libwebsockets 预编失败（configure/编译阶段），本轮在完整编译前中止；完整日志见 /tmp/build.log"
+            echo "::error::预热或 lws 预编失败（rc=$pre），本轮在完整编译前中止；完整日志见 /tmp/build.log"
             exit $pre
           fi
           echo "===== 预编通过，开始完整编译 ====="
