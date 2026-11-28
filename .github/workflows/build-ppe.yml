@@ -305,9 +305,13 @@ jobs:
           # 总时长基本不变，但 lws 出问题能在半小时内暴露。
           echo "===== 预编 libwebsockets（早失败）====="
           pre=0
-          make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee /tmp/build-lws.log || pre=$?
+          # 日志必须写到 /tmp/build.log：失败诊断、上传日志、logs 分支三处都只认这个文件名。
+          # run 46127565116 就是在这丢了日志 —— 预编写 /tmp/build-lws.log，诊断读 build.log，
+          # 结果失败后只有 16 行"没有日志"的摘要，真实错误一个字都没留下。
+          make package/feeds/packages/libwebsockets/compile -j1 V=s 2>&1 | tee /tmp/build.log || pre=$?
+          cp /tmp/build.log /tmp/build-lws.log || true
           if [[ $pre -ne 0 ]]; then
-            echo "::error::libwebsockets 预编失败（configure/编译阶段），本轮在完整编译前中止"
+            echo "::error::libwebsockets 预编失败（configure/编译阶段），本轮在完整编译前中止；完整日志见 /tmp/build.log"
             exit $pre
           fi
           echo "===== 预编通过，开始完整编译 ====="
@@ -341,8 +345,12 @@ jobs:
       - name: 失败诊断
         if: failure() || cancelled()
         run: |
-          LOG=/tmp/build.log
-          [[ -f "$LOG" ]] || { echo "(无构建日志)"; exit 0; }
+          LOG=""
+          for f in /tmp/build.log /tmp/build-lws.log /tmp/build_serial.log; do
+            [[ -s "$f" ]] && { LOG=$f; break; }
+          done
+          [[ -n "$LOG" ]] || { echo "(无构建日志：/tmp/build.log、build-lws.log、build_serial.log 都不存在)"; exit 0; }
+          echo "诊断读取：$LOG"
           echo "===== 日志规模 ====="; wc -l "$LOG" || true
 
           echo "===== 日志尾部 60 行 ====="
@@ -384,7 +392,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ppe-build-log-${{ github.run_id }}
-          path: /tmp/build.log
+          path: |
+            /tmp/build.log
+            /tmp/build-lws.log
+            /tmp/build_serial.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -396,6 +407,7 @@ jobs:
         run: |
           set +e
           LOG=/tmp/build.log
+          [ -s "$LOG" ] || LOG=/tmp/build-lws.log
           [ -s "$LOG" ] || LOG=/tmp/build_serial.log
           R=/tmp/failure-report.txt
           {
